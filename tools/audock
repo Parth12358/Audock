@@ -253,7 +253,7 @@ def fill_template(name, mapping):
 
 def write_new(path, content, force=False):
     if path.exists() and not force:
-        sys.exit(f"error: {path.relative_to(VAULT)} already exists (use a different title)")
+        sys.exit(f"error: {path.relative_to(VAULT).as_posix()} already exists (use a different title)")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content.encode("utf-8"))  # no newline translation on any OS
     return path
@@ -317,8 +317,8 @@ def cmd_new(args):
             "__BODY__": "",
         })
         path = write_new(VAULT / "sources" / "manual" / f"{ts}-{slug}.md", content, args.force)
-    print(f"created {path.relative_to(VAULT)}")
-    _journal(f"new {args.kind}", f"{title} ({path.relative_to(VAULT)})")
+    print(f"created {path.relative_to(VAULT).as_posix()}")
+    _journal(f"new {args.kind}", f"{title} ({path.relative_to(VAULT).as_posix()})")
 
 
 MAX_FETCH = 8_000_000  # bytes; larger pages are refused rather than silently truncated
@@ -413,7 +413,7 @@ def cmd_ingest(args):
         fm, _ = parse_frontmatter(read(existing))
         if str(fm.get("hash", "")).endswith(digest):
             print(f"duplicate: identical content already captured at "
-                  f"{existing.relative_to(VAULT)} ([[{fm.get('id')}]])")
+                  f"{existing.relative_to(VAULT).as_posix()} ([[{fm.get('id')}]])")
             print("skipping re-capture. Distill from the existing source.")
             return
 
@@ -427,7 +427,7 @@ def cmd_ingest(args):
         "__BODY__": body,  # stored verbatim — the body below the frontmatter is the ground truth
     })
     out = write_new(VAULT / "sources" / KIND_TO_DIR[kind] / f"{source_id}.md", content, args.force)
-    print(f"captured {out.relative_to(VAULT)}")
+    print(f"captured {out.relative_to(VAULT).as_posix()}")
     print(f"source id: {source_id}")
     _journal(f"ingest({kind})", f"{title} ([[{source_id}]])")
     print(f"next: check for an existing note first  →  {_prog()} similar \"{title}\"")
@@ -567,7 +567,7 @@ def _search(term, tag=None, type_=None, since=None, include_superseded=False):
             if score <= 0:
                 continue
         results.append({
-            "path": str(p.relative_to(VAULT)),
+            "path": p.relative_to(VAULT).as_posix(),
             "id": fm.get("id", ""),
             "title": fm.get("title", ""),
             "type": fm.get("type", ""),
@@ -705,7 +705,7 @@ def _link_graph():
         fm, body = parse_frontmatter(read(p))
         if fm.get("type") in (None, "journal", "source"):
             continue
-        rel = str(p.relative_to(VAULT))
+        rel = p.relative_to(VAULT).as_posix()
         if rel in GENERATED:
             continue
         src = (fm.get("id") or p.stem, fm.get("title") or p.stem, rel)
@@ -727,7 +727,7 @@ def cmd_backlinks(args):
         sys.exit(f"not found: {args.id}")
     p, fm, body = hit
     graph = _link_graph()
-    self_rel = str(p.relative_to(VAULT))
+    self_rel = p.relative_to(VAULT).as_posix()
     rows, seen = [], set()
     for k in _keys_of(p, fm):
         for sid, stitle, srel in graph.get(k, []):
@@ -764,7 +764,7 @@ def cmd_view(args):
     out = VAULT / "bases" / f"{slug}.base"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(base, encoding="utf-8")
-    print(f"wrote {out.relative_to(VAULT)} (open it in Obsidian 1.9+ for a live table)")
+    print(f"wrote {out.relative_to(VAULT).as_posix()} (open it in Obsidian 1.9+ for a live table)")
 
 
 def _replace_block(text, begin, end, new_inner):
@@ -890,7 +890,7 @@ def cmd_reindex(args):
             fm, body = parse_frontmatter(read(p))
             if fm.get("type") != "note" or _is_locked(fm):
                 continue  # never write into human-owned notes
-            self_rel = str(p.relative_to(VAULT))
+            self_rel = p.relative_to(VAULT).as_posix()
             rows, seen = [], set()
             for k in _keys_of(p, fm):
                 for sid, stitle, srel in graph.get(k, []):
@@ -956,7 +956,7 @@ def cmd_doctor(args):
     notes, incoming, broken = [], {}, []
     for p in md_files():
         fm, body = parse_frontmatter(read(p))
-        rel = str(p.relative_to(VAULT))
+        rel = p.relative_to(VAULT).as_posix()
         if fm.get("type") == "note":
             notes.append((p, fm, body))  # keep body to avoid re-reading each note later
         # Generated indexes and the journal list/mention notes but aren't semantic backlinks;
@@ -980,13 +980,13 @@ def cmd_doctor(args):
         keys = {str(fm.get("id", "")).lower(), str(fm.get("title", "")).lower(), p.stem.lower()}
         keys |= {a.lower() for a in as_list(fm.get("aliases"))}
         if not (keys & incoming_set):
-            orphans.append(str(p.relative_to(VAULT)))
+            orphans.append(p.relative_to(VAULT).as_posix())
 
     # duplicate candidates: same slugified title
     by_slug = {}
     for p, fm, _ in notes:
         by_slug.setdefault(slugify(str(fm.get("title", p.stem))), []).append(
-            str(p.relative_to(VAULT)))
+            p.relative_to(VAULT).as_posix())
     dups = {k: v for k, v in by_slug.items() if len(v) > 1}
 
     # stale: updated older than STALE_DAYS
@@ -995,7 +995,7 @@ def cmd_doctor(args):
     for p, fm, _ in notes:
         stamp = str(fm.get("updated") or fm.get("created") or "")[:10]
         if stamp and stamp < cutoff:
-            stale.append((str(p.relative_to(VAULT)), stamp))
+            stale.append((p.relative_to(VAULT).as_posix(), stamp))
 
     # names that resolve to an actual capture, for provenance checking
     source_names = set()
@@ -1007,7 +1007,7 @@ def cmd_doctor(args):
     # notes whose sources: cite a capture that no longer exists (broken provenance)
     missing_src, underlinked = [], []
     for p, fm, body in notes:
-        rel = str(p.relative_to(VAULT))
+        rel = p.relative_to(VAULT).as_posix()
         for s in as_list(fm.get("sources")):
             tgts = _links(s) or [s]
             for t in tgts:
@@ -1026,7 +1026,7 @@ def cmd_doctor(args):
     tag_variants = {k: sorted(v) for k, v in norm.items() if len(v) > 1}
 
     # locked = human-owned; informational so you can see what Claude must not touch
-    locked = [str(p.relative_to(VAULT)) for p, fm, _ in notes if _is_locked(fm)]
+    locked = [p.relative_to(VAULT).as_posix() for p, fm, _ in notes if _is_locked(fm)]
 
     def section(title, items):
         print(f"\n{title}: {len(items)}")
@@ -1129,7 +1129,7 @@ def _sql_rows(table):
 
 
 def _backlink_count(p, fm, graph):
-    self_rel = str(p.relative_to(VAULT))
+    self_rel = p.relative_to(VAULT).as_posix()
     return len({srel for k in _keys_of(p, fm) for _, _, srel in graph.get(k, [])
                 if srel != self_rel})
 
@@ -1141,7 +1141,7 @@ def _field_value(field, p, fm, body, graph):
     if f in ("links", "outlinks"):
         return len(set(_links(body)))
     if f == "path":
-        return str(p.relative_to(VAULT))
+        return p.relative_to(VAULT).as_posix()
     if f in ("text", "body"):
         return body
     if f in ("tag", "tags"):
@@ -1417,7 +1417,7 @@ def _sql_update(stmt, args):
         if not _match(p, fm, body, graph, conds):
             continue
         if _is_locked(fm):
-            locked_skip.append(str(p.relative_to(VAULT)))
+            locked_skip.append(p.relative_to(VAULT).as_posix())
             continue
         raw = read(p)
         new = raw
@@ -1447,7 +1447,7 @@ def _sql_update(stmt, args):
             new = _set_fm_field(new, "updated", today())
             if fm.get("type") == "note":
                 new = _append_log(new, f"- {today()} — sql: {', '.join(notes)}")
-            changed.append(str(p.relative_to(VAULT)))
+            changed.append(p.relative_to(VAULT).as_posix())
             if args.apply:
                 p.write_text(new, encoding="utf-8")
     verb = "updated" if args.apply else "would update (dry-run)"
@@ -1504,7 +1504,7 @@ def _sql_merge(stmt, args):
         raw = read(p)
         new = _rewrite_links(raw, drop_keys, keep_id)
         if new != raw:
-            rewired.append(str(p.relative_to(VAULT)))
+            rewired.append(p.relative_to(VAULT).as_posix())
             if args.apply:
                 p.write_text(new, encoding="utf-8")
     # keep: alias of the dropped title + a log line
