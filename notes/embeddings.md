@@ -3,11 +3,13 @@ id: 20261015-embeddings
 title: Embeddings
 type: note
 tags: [domain/ml, topic/embeddings]
+summary: Embeddings turn text into vectors so semantic similarity becomes geometric distance.
 created: 2026-10-15
 updated: 2026-10-15
 aliases: [vector embeddings]
 sources: ["[[20261016T051857-embeddings-note]]"]
 status: stable
+superseded_by: 
 ---
 
 # Embeddings

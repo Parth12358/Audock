@@ -1,0 +1,80 @@
+name: release
+
+# Build standalone `audock` binaries for macOS, Linux, and Windows and attach them to a
+# GitHub Release. Triggers when you push a version tag (e.g. `git tag v0.1.0 && git push --tags`),
+# or can be run manually from the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create the Release and upload assets
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: audock-linux-x86_64
+          - os: macos-latest
+            asset: audock-macos-arm64
+          - os: windows-latest
+            asset: audock-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      # The CLI has no extension; PyInstaller wants a .py entrypoint.
+      - name: Stage entrypoint
+        shell: bash
+        run: cp tools/audock audock_cli.py
+
+      - name: Build onefile binary
+        run: pyinstaller --onefile --name audock audock_cli.py
+
+      - name: Rename asset (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: mv dist/audock "dist/${{ matrix.asset }}"
+
+      - name: Rename asset (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: mv dist/audock.exe "dist/${{ matrix.asset }}"
+
+      - name: Smoke test
+        shell: bash
+        run: "dist/${{ matrix.asset }} --help"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

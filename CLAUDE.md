@@ -44,26 +44,31 @@ note. Steps:
 1. **Classify origin** → `conversation` | `code` | `web` | `manual`.
 2. **Capture verbatim** into `sources/<kind>/`:
    `tools/audock ingest <file|url|-> --type <kind> [--title "..."] [--ref <url-or-id>]`
-   This writes `sources/<kind>/<timestamp>-<slug>.md` with frontmatter + a `sha256` hash of the
-   body, and prints the new source id. The body is fenced verbatim — do not paraphrase it here.
-3. **Dedup.** Before distilling, search for an existing capture/note:
-   `tools/audock query "<distinctive phrase or title>"`. If an identical source hash already
-   exists, reuse it instead of re-capturing. If a note on the concept already exists, go to 4b.
+   This writes `sources/<kind>/<timestamp>-<slug>.md` with frontmatter + a `sha256` hash. The
+   body below the frontmatter is stored **byte-verbatim** — the lossless ground truth. If an
+   identical body was already captured, the CLI says so; reuse that source.
+3. **Dedup gate (decide ADD / UPDATE / SUPERSEDE / NOOP).** Before writing a note, run
+   `tools/audock similar "<concept title>"`. Then:
+   - **NOOP** — the fact is already fully captured → stop (don't duplicate).
+   - **UPDATE** — a note covers this concept → go to 4b (append, don't fork).
+   - **SUPERSEDE** — an existing note is now *wrong/outdated* → create the corrected note, and on
+     the old one set `status: superseded` + `superseded_by: "[[new-note]]"` (never delete it).
+   - **ADD** — genuinely new → 4a.
+   Skip storing anything trivially re-derivable or already verbatim in a source.
 4. **Distill into atomic note(s):**
-   - **4a. New concept** → `tools/audock new note "Concept Title"`, then fill the body with the
-     distilled explanation, set `tags:`, set `sources: ["[[<source-id>]]"]`, add `[[wikilinks]]`
-     to related notes, set `status: stable` when confident.
-   - **4b. Existing concept** → open the note, append a dated line to its `## Log`
-     (e.g. `- 2026-10-15 — added detail about X from [[<source-id>]]`), add the new `[[source]]`
-     to `sources:`, integrate the new fact into the body additively, and bump `updated:`.
-5. **Backlink the source.** Add each resulting note to the source file's `distilled_into:` list.
-   (This is the one allowed edit to a source: its frontmatter `distilled_into:` only — never the
-   body.)
-6. **Place in the graph.** Add/confirm a `[[link]]` to the note from the relevant `maps/<domain>`
-   MOC (create it with `tools/audock new moc "<Domain>"` if none fits) and ensure the MOC is
-   linked from [[index]].
-7. **Reindex & commit:** `tools/audock reindex` then
-   `git add -A && git commit -m "ingest(<kind>): <title>"`.
+   - **4a. New concept** → `tools/audock new note "Concept Title"`, fill the distilled body, set
+     `tags:`, a one-line **`summary:`** (what it claims + where it came from — this boosts
+     retrieval), `sources: ["[[<source-id>]]"]`, add `[[wikilinks]]` to related notes, and
+     `status: stable` when confident.
+   - **4b. Existing concept** → append a dated line to its `## Log`, add the new `[[source]]`
+     to `sources:`, integrate the fact additively, and bump `updated:`.
+5. **Backlink the source.** Add each resulting note to the source's `distilled_into:` — the one
+   allowed edit to a source (frontmatter only, never the body).
+6. **Place in the graph.** Link the note from the relevant `maps/<domain>` MOC (create with
+   `tools/audock new moc "<Domain>"` if none fits); ensure the MOC is linked from [[index]].
+7. **Reindex & commit:** `tools/audock reindex` then `git add -A && git commit -m
+   "ingest(<kind>): <title>"`. (`new`/`ingest` auto-append a line to `journal/<today>.md`; add
+   your own with `tools/audock log "<what you did>"`.)
 
 ## QUERY — answering from the vault
 
@@ -109,12 +114,16 @@ past). Then:
 ```
 tools/audock new note|source|moc "Title"
 tools/audock ingest <file|url|-> --type conversation|code|web|manual [--title ..] [--ref ..]
-tools/audock context "question" [--tag t] [--k N] [--max-bytes B]   # cheapest answer path
-tools/audock query "text" [--tag t] [--type note|source|moc] [--since YYYY-MM-DD] [--json]
+tools/audock similar "title"                                        # dedup gate before distilling
+tools/audock context "question" [--tag t] [--k N] [--all]           # cheapest answer path
+tools/audock query "text" [--tag t] [--type note|source|moc] [--since D] [--all] [--json]
 tools/audock show <id> [--body | --raw]                             # one item; --raw = verbatim
+tools/audock log "what you did"                                     # append to today's journal
 tools/audock reindex
 tools/audock doctor
 ```
+(`--all` includes `superseded` notes, which are hidden by default. Add `--vault <path>` or set
+`$AUDOCK_VAULT` when running the installed binary from outside the vault.)
 
 ## Optional automation (not on by default)
 

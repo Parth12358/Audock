@@ -18,17 +18,19 @@ the quick operator's cheat-sheet.
 
 ## Add / capture / remember  → INGEST
 1. `tools/audock ingest <file|url|-> --type conversation|code|web|manual [--title ..] [--ref ..]`
-   (stdin via `-`). Writes a verbatim, hashed capture to `sources/`. If it reports a duplicate,
+   (stdin via `-`). Writes a byte-verbatim, hashed capture to `sources/`. On a duplicate report,
    reuse the existing source.
-2. Search first: `tools/audock query "<distinctive phrase>"`.
-   - New concept → `tools/audock new note "Title"`, fill the body (distilled, not verbatim),
-     set `tags:`, `sources: ["[[<source-id>]]"]`, add `[[wikilinks]]`, set `status: stable`.
-   - Existing concept → append a dated `## Log` line, add the source to `sources:`, integrate
-     the fact additively, bump `updated:`.
-3. Append the new note to the source's `distilled_into:`.
-4. Link the note from the right `maps/<domain>` MOC (make one with `new moc` if needed);
-   ensure the MOC is reachable from `index.md`.
-5. `tools/audock reindex` → `git add -A && git commit -m "ingest(<kind>): <title>"`.
+2. **Dedup gate:** `tools/audock similar "<concept>"`, then choose:
+   ADD (new) · UPDATE (append to existing note's `## Log`, add source, bump `updated:`) ·
+   SUPERSEDE (make the corrected note; on the old set `status: superseded` +
+   `superseded_by: "[[new]]"`) · NOOP (already captured). Don't store the re-derivable.
+3. New note → `tools/audock new note "Title"`; fill distilled body, set `tags:`, a one-line
+   `summary:` (boosts retrieval), `sources: ["[[<source-id>]]"]`, `[[wikilinks]]`, `status:`.
+4. Append the new note to the source's `distilled_into:` (source frontmatter only, never body).
+5. Link from the right `maps/<domain>` MOC (make one with `new moc` if needed); keep it reachable
+   from `index.md`.
+6. `tools/audock reindex` → `git add -A && git commit -m "ingest(<kind>): <title>"`.
+   (`new`/`ingest` auto-log to `journal/<today>.md`; `tools/audock log "..."` adds manual lines.)
 
 ## Look up / query  → QUERY  (lead with the cheapest step)
 1. `tools/audock context "<question>" [--tag T] [--k N]` — bounded, comment-stripped answer

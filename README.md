@@ -32,14 +32,33 @@ natively in [Obsidian](https://obsidian.md).
 ## CLI
 
 ```sh
-tools/audock new note|source|moc "Title"     # scaffold a file from a template
-tools/audock ingest <file|url|-> --type web   # capture raw material into sources/
-tools/audock query "text" [--tag t --type note --since 2026-01-01]
+tools/audock new note|source|moc "Title"      # scaffold a file from a template
+tools/audock ingest <file|url|-> --type web   # capture raw material into sources/ (verbatim+hash)
+tools/audock similar "Title"                  # top-k similar notes (run before adding — dedup gate)
+tools/audock context "question" [--k N --all] # bounded answer pack — the cheapest way to query
+tools/audock query "text" [--tag t --type note --since 2026-01-01 --all --json]
+tools/audock show <id> [--body | --raw]       # one item; --raw = verbatim (lossless drill-down)
+tools/audock log "what you did"               # append to today's journal/<date>.md
 tools/audock reindex                          # rebuild tags.md + index link lists
-tools/audock doctor                           # orphans / broken links / dups / stale
+tools/audock doctor                           # links / missing-source / orphans / dups / stale
 ```
 
-Pure Python 3, no required dependencies (uses `ripgrep` if installed, else `grep`).
+Pure Python 3, no required dependencies (uses `ripgrep` if installed, else falls back to a
+Python scan). Superseded notes are hidden from queries unless `--all`. Journal entries are an
+activity log, excluded from knowledge queries.
+
+### Install (standalone binary)
+
+No Python needed — grab a prebuilt `audock` for macOS / Linux / Windows from the repo's
+[Releases](../../releases) (built by GitHub Actions on each `v*` tag). Then run it from inside a
+vault, or point it at one:
+
+```sh
+audock --vault /path/to/Audock query "embeddings"   # or: export AUDOCK_VAULT=/path/to/Audock
+```
+
+The binary carries the templates internally, so it works even outside the repo. Maintainers cut
+a release with `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Obsidian setup
 

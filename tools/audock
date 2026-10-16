@@ -2,17 +2,24 @@
 """audock — the Audock vault librarian CLI.
 
 Zero required dependencies. Uses ripgrep for fast search if present, else falls back to a
-pure-Python scan. Run from anywhere; the vault root is inferred from this script's location.
+pure-Python scan. The vault root is found via --vault, then $AUDOCK_VAULT, then the nearest
+ancestor of the CWD containing notes/ & sources/, then this script's parent dir — so the
+in-repo script and a released standalone binary both work.
 
 Commands:
   new note|source|moc "Title"                      scaffold a file from a template
   ingest <file|url|-> --type KIND [--title ..] [--ref ..]   capture raw material into sources/
-  query "text" [--tag T] [--type T] [--since DATE] [--json]  search frontmatter + body
+  context "question" [--tag T] [--k N] [--all]     bounded answer pack (cheapest query)
+  query "text" [--tag T] [--type T] [--since DATE] [--all] [--json]   ranked search
+  similar "title"                                  top-k similar notes (dedup gate)
+  show <id> [--body | --raw]                       one item; --raw = verbatim/lossless
+  log "message"                                    append a line to today's journal
   reindex                                          rebuild tags.md + index.md maps list
-  doctor                                           report orphans / broken links / dups / stale
+  doctor                                           hygiene report (links/orphans/dups/...)
 """
 import argparse
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -20,9 +27,27 @@ import urllib.request
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
-VAULT = Path(__file__).resolve().parent.parent
-TEMPLATES = VAULT / "templates"
+VAULT = None  # resolved at startup by _resolve_vault()
 SKIP_DIRS = {".git", ".obsidian", "templates", ".trash", "__pycache__", "inbox"}
+
+
+def _resolve_vault(explicit=None):
+    """Find the vault root so a released standalone binary works from anywhere:
+    --vault flag > $AUDOCK_VAULT > nearest ancestor of CWD containing notes/ & sources/
+    > this script's parent dir (the in-repo `<vault>/tools/audock` layout)."""
+    if explicit:
+        return Path(explicit).resolve()
+    env = os.environ.get("AUDOCK_VAULT")
+    if env:
+        return Path(env).resolve()
+    cur = Path.cwd().resolve()
+    for d in [cur, *cur.parents]:
+        if (d / "notes").is_dir() and (d / "sources").is_dir():
+            return d
+    try:
+        return Path(__file__).resolve().parent.parent
+    except NameError:  # frozen binary with no real __file__
+        return cur
 KIND_TO_DIR = {
     "conversation": "conversations",
     "code": "code",
@@ -156,8 +181,36 @@ def as_list(v):
 
 # ---------- template instantiation ----------
 
+# Embedded fallbacks so a standalone binary works without the vault's templates/ dir.
+# When templates/<name>.md exists in the vault it takes precedence (Obsidian-editable).
+EMBEDDED_TEMPLATES = {
+    "note": (
+        "---\nid: __ID__\ntitle: __TITLE__\ntype: note\ntags: []\nsummary: \n"
+        "created: __DATE__\nupdated: __DATE__\naliases: []\nsources: []\n"
+        "status: draft\nsuperseded_by: \n---\n\n# __TITLE__\n\n"
+        "<!-- One concept per note. Distilled, not verbatim. Link liberally with [[other-note]]. -->\n"
+        "<!-- summary: = one line — what this note claims + where it came from (boosts retrieval). -->\n"
+        "<!-- When superseded, set status: superseded and superseded_by: \"[[new-note]]\". -->\n\n"
+        "## Log\n- __DATE__ — created\n"
+    ),
+    "source": (
+        "---\nid: __ID__\ntitle: __TITLE__\ntype: source\norigin: __ORIGIN__\n"
+        "origin_ref: __ORIGIN_REF__\ncaptured: __TS__\nhash: __HASH__\n"
+        "distilled_into: []\n---\n__BODY__\n"
+    ),
+    "moc": (
+        "---\nid: __ID__\ntitle: __TITLE__\ntype: moc\ntags: [moc]\ncreated: __DATE__\n"
+        "updated: __DATE__\naliases: []\nstatus: stable\n---\n\n# __TITLE__\n\n"
+        "## Key notes\n<!-- Curated [[wikilinks]] — the canonical entry points. -->\n\n"
+        "## All notes in this domain\n```dataview\nTABLE updated, status\nFROM #__SLUG__\n"
+        "WHERE type = \"note\"\nSORT updated DESC\n```\n"
+    ),
+}
+
+
 def fill_template(name, mapping):
-    tpl = read(TEMPLATES / f"{name}.md")
+    f = VAULT / "templates" / f"{name}.md"
+    tpl = read(f) if f.exists() else EMBEDDED_TEMPLATES[name]
     for k, v in mapping.items():
         tpl = tpl.replace(k, v)
     return tpl
@@ -171,7 +224,32 @@ def write_new(path, content, force=False):
     return path
 
 
+# ---------- daily activity log ----------
+
+def _journal(action, detail):
+    """Append a dated line to journal/YYYY-MM-DD.md (an Obsidian daily note). Records what
+    the librarian did, so there's a human-browsable activity trail. type: journal keeps these
+    out of knowledge queries."""
+    day = today()
+    jdir = VAULT / "journal"
+    jdir.mkdir(parents=True, exist_ok=True)
+    f = jdir / f"{day}.md"
+    if not f.exists():
+        f.write_text(
+            f"---\nid: {day}-journal\ntitle: Journal {day}\ntype: journal\ncreated: {day}\n"
+            f"---\n\n# Journal {day}\n\n",
+            encoding="utf-8",
+        )
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(f"- {datetime.now().strftime('%H:%M')} — {action}: {detail}\n")
+
+
 # ---------- commands ----------
+
+def cmd_log(args):
+    _journal("note", args.message)
+    print(f"logged to journal/{today()}.md")
+
 
 def cmd_new(args):
     title = args.title
@@ -205,6 +283,7 @@ def cmd_new(args):
         })
         path = write_new(VAULT / "sources" / "manual" / f"{ts}-{slug}.md", content, args.force)
     print(f"created {path.relative_to(VAULT)}")
+    _journal(f"new {args.kind}", f"{title} ({path.relative_to(VAULT)})")
 
 
 def _load_body(src, kind):
@@ -258,7 +337,9 @@ def cmd_ingest(args):
     out = write_new(VAULT / "sources" / KIND_TO_DIR[kind] / f"{source_id}.md", content, args.force)
     print(f"captured {out.relative_to(VAULT)}")
     print(f"source id: {source_id}")
-    print("next: distill with  tools/audock new note \"<Concept>\"  and set "
+    _journal(f"ingest({kind})", f"{title} ([[{source_id}]])")
+    print(f"next: check for an existing note first  →  tools/audock similar \"{title}\"")
+    print("then distill: tools/audock new note \"<Concept>\"  and set "
           f"sources: [\"[[{source_id}]]\"]")
 
 
@@ -294,20 +375,27 @@ def _score(term, fm, body, path):
     if not toks:  # tag/type-only listing: neutral match so filters still return rows
         return 1, _first_line(body)[:160]
     title = str(fm.get("title", "")).lower()
+    summary = str(fm.get("summary", "")).lower()
     aliases = " ".join(as_list(fm.get("aliases"))).lower()
     tags = " ".join(as_list(fm.get("tags"))).lower()
     body_l = body.lower()
     name = path.name.lower()
+
+    def hits(token, text):  # word-boundary (prefix) match: `embedding` hits `embeddings`,
+        return len(re.findall(r"\b" + re.escape(token), text))  # but `thing` misses `everything`
+
     score = 0
     for t in toks:
-        if t in title:
+        if hits(t, title):
             score += 10
-        if t in aliases:
+        if hits(t, summary):  # contextual-prefix lever: the authored one-liner ranks high
+            score += 8
+        if hits(t, aliases):
             score += 6
-        if t in tags:
+        if hits(t, tags):
             score += 4
-        score += body_l.count(t)
-        if t in name:
+        score += hits(t, body_l)
+        if hits(t, name):
             score += 2
     phrase = term.strip().lower()
     if len(phrase) >= 4 and phrase in body_l:  # exact-phrase bonus keeps precision
@@ -315,7 +403,7 @@ def _score(term, fm, body, path):
     snippet = ""
     for line in body.split("\n"):
         ls = line.strip()
-        if ls and not ls.startswith(("---", "<!--")) and any(t in ls.lower() for t in toks):
+        if ls and not ls.startswith(("---", "<!--")) and any(hits(t, ls.lower()) for t in toks):
             snippet = ls
             break
     return score, (snippet or _first_line(body))[:160]
@@ -340,14 +428,20 @@ def _rg_candidates(term):
     return None
 
 
-def _search(term, tag=None, type_=None, since=None):
-    """Rank vault files against `term` with optional filters. Returns list of dicts."""
+def _search(term, tag=None, type_=None, since=None, include_superseded=False):
+    """Rank vault files against `term` with optional filters. Returns list of dicts.
+    Journal entries are always excluded (activity log, not knowledge); superseded notes are
+    excluded unless include_superseded — so stale/contradicted notes don't surface by default."""
     candidates = _rg_candidates(term)
     files = candidates if candidates is not None else list(md_files())
     results = []
     for p in files:
         fm, body = parse_frontmatter(read(p))
         if not fm.get("type"):  # skip operational docs (CLAUDE.md, README.md); not knowledge
+            continue
+        if str(fm.get("type", "")) == "journal":
+            continue
+        if not include_superseded and str(fm.get("status", "")).lower() == "superseded":
             continue
         if type_ and str(fm.get("type", "")) != type_:
             continue
@@ -405,7 +499,8 @@ def cmd_show(args):
     if args.body:
         print(clean)
         return
-    for k in ("id", "title", "type", "tags", "sources", "status", "updated"):
+    for k in ("id", "title", "type", "tags", "summary", "sources", "status",
+              "superseded_by", "updated"):
         v = fm.get(k)
         if v:
             print(f"{k}: {', '.join(v) if isinstance(v, list) else v}")
@@ -417,7 +512,9 @@ def cmd_context(args):
     """One call → a bounded, deduped, comment-stripped answer pack for a question.
     This is the cheapest way to answer: no frontmatter noise, no whole-file reads,
     size-capped, with explicit note of anything omitted (never a silent cap)."""
-    results = _search(args.question, tag=args.tag, type_="note", since=args.since)
+    sup = getattr(args, "all", False)
+    results = _search(args.question, tag=args.tag, type_="note", since=args.since,
+                      include_superseded=sup)
     from_sources = False
     if not results:
         # Fall back to raw sources: the vault may hold the answer undistilled. Returning
@@ -436,6 +533,8 @@ def cmd_context(args):
         prov = as_list(fm.get("sources"))
         tag = "  (raw source)" if from_sources else ""
         header = f"### {fm.get('title', r['id'])}  [[{fm.get('id', '')}]]{tag}"
+        if fm.get("summary"):
+            header += f"\n_{fm.get('summary')}_"
         if prov:
             header += f"\nsources: {', '.join(prov)}"
         block = f"{header}\n{clean}\n"
@@ -452,8 +551,21 @@ def cmd_context(args):
     print("[For verbatim quotes/numbers/code, drill to a source: audock show <source-id> --raw]")
 
 
+def cmd_similar(args):
+    """Top-k existing NOTES similar to a title/text — run before distilling so you can
+    choose ADD / UPDATE / SUPERSEDE / NOOP instead of creating a near-duplicate."""
+    results = _search(args.text, type_="note", include_superseded=True)
+    if not results:
+        print("no similar notes — safe to ADD a new note")
+        return
+    print("most similar existing notes (consider UPDATE/SUPERSEDE before adding a duplicate):")
+    for r in results[: args.k]:
+        print(f"[{r['score']:>3}] {r['title']}  [[{r['id']}]]  ({r['path']})")
+
+
 def cmd_query(args):
-    results = _search(args.text or "", tag=args.tag, type_=args.type, since=args.since)
+    results = _search(args.text or "", tag=args.tag, type_=args.type, since=args.since,
+                      include_superseded=getattr(args, "all", False))
     if args.json:
         import json
         print(json.dumps(results, indent=2))
@@ -559,7 +671,8 @@ def cmd_doctor(args):
         rel = str(p.relative_to(VAULT))
         if fm.get("type") == "note":
             notes.append((p, fm))
-        if rel in GENERATED:
+        # Generated indexes and the journal list/mention notes but aren't semantic backlinks.
+        if rel in GENERATED or fm.get("type") == "journal":
             continue
         for target in _links(body):
             tgt = target.strip()
@@ -591,6 +704,27 @@ def cmd_doctor(args):
         if stamp and stamp < cutoff:
             stale.append((str(p.relative_to(VAULT)), stamp))
 
+    # names that resolve to an actual capture, for provenance checking
+    source_names = set()
+    for p in md_files(VAULT / "sources"):
+        sfm, _ = parse_frontmatter(read(p))
+        source_names.add(str(sfm.get("id", "")).lower())
+        source_names.add(p.stem.lower())
+
+    # notes whose sources: cite a capture that no longer exists (broken provenance)
+    missing_src, underlinked = [], []
+    for p, fm in notes:
+        rel = str(p.relative_to(VAULT))
+        for s in as_list(fm.get("sources")):
+            tgts = _links(s) or [s]
+            for t in tgts:
+                if t.strip().lower() not in source_names:
+                    missing_src.append(f"{rel} -> {t}")
+        # under-linked: fewer than 2 outgoing wikilinks (weakly wired into the graph)
+        body = parse_frontmatter(read(p))[1]
+        if len(_links(body)) < 2:
+            underlinked.append(rel)
+
     def section(title, items):
         print(f"\n{title}: {len(items)}")
         for it in items:
@@ -598,15 +732,18 @@ def cmd_doctor(args):
 
     print(f"audock doctor — {len(notes)} notes")
     section("broken links", [f"{src} -> [[{tgt}]]" for src, tgt in broken])
+    section("notes citing a missing source", missing_src)
     section("orphan notes (no backlinks)", orphans)
+    section("under-linked notes (< 2 links)", underlinked)
     section("duplicate-title candidates", [f"{k}: {', '.join(v)}" for k, v in dups.items()])
     section(f"stale notes (> {STALE_DAYS}d)", [f"{p} ({s})" for p, s in stale])
-    if not (broken or orphans or dups or stale):
+    if not (broken or missing_src or orphans or underlinked or dups or stale):
         print("\nall clear ✓")
 
 
 def main():
     ap = argparse.ArgumentParser(prog="audock", description="Audock vault librarian")
+    ap.add_argument("--vault", help="vault root (else $AUDOCK_VAULT or nearest ancestor)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_new = sub.add_parser("new", help="scaffold a file from a template")
@@ -629,8 +766,18 @@ def main():
     p_q.add_argument("--type", choices=["note", "source", "moc", "entity"])
     p_q.add_argument("--since", help="YYYY-MM-DD; filter by updated/created")
     p_q.add_argument("--limit", type=int, default=15)
+    p_q.add_argument("--all", action="store_true", help="include superseded notes")
     p_q.add_argument("--json", action="store_true")
     p_q.set_defaults(func=cmd_query)
+
+    p_sim = sub.add_parser("similar", help="top-k notes similar to a title (dedup gate)")
+    p_sim.add_argument("text")
+    p_sim.add_argument("--k", type=int, default=5)
+    p_sim.set_defaults(func=cmd_similar)
+
+    p_log = sub.add_parser("log", help="append a line to today's journal")
+    p_log.add_argument("message")
+    p_log.set_defaults(func=cmd_log)
 
     p_s = sub.add_parser("show", help="print one note/source (compact, or --raw for verbatim)")
     p_s.add_argument("id", help="id / title / alias / filename stem")
@@ -645,6 +792,7 @@ def main():
     p_c.add_argument("--k", type=int, default=5, help="max notes to include")
     p_c.add_argument("--max-bytes", type=int, default=6000, dest="max_bytes",
                      help="size cap for the pack")
+    p_c.add_argument("--all", action="store_true", help="include superseded notes")
     p_c.set_defaults(func=cmd_context)
 
     p_r = sub.add_parser("reindex", help="rebuild tags.md + index.md maps list")
@@ -654,6 +802,8 @@ def main():
     p_d.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
+    global VAULT
+    VAULT = _resolve_vault(args.vault)
     args.func(args)
 
 

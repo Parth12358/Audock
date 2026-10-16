@@ -10,3 +10,9 @@ Thumbs.db
 *.swp
 __pycache__/
 *.pyc
+
+# PyInstaller build artifacts (release.yml)
+build/
+dist/
+*.spec
+audock_cli.py
