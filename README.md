@@ -80,18 +80,37 @@ with `<!-- audock:human -->` … `<!-- /audock:human -->`. The librarian protoco
 these as **read-only** — it may read, cite, and link to them, but never edit, supersede, move, or
 delete them. `audock doctor` reports how many notes are locked.
 
-### Install (standalone binary)
+### Install
 
-No Python needed — grab a prebuilt `audock` for macOS / Linux / Windows from the repo's
-[Releases](../../releases) (built by GitHub Actions on each `v*` tag). Then run it from inside a
-vault, or point it at one:
+**macOS (Apple silicon) and Linux** — installs `~/.local/bin/audock`, no sudo, verifies it runs:
 
 ```sh
-audock --vault /path/to/Audock query "embeddings"   # or: export AUDOCK_VAULT=/path/to/Audock
+curl -fsSL https://parth12358.github.io/Audock/install.sh | sh
 ```
 
-The binary carries the templates internally, so it works even outside the repo. Maintainers cut
-a release with `git tag v0.1.0 && git push origin v0.1.0`.
+**Windows (PowerShell)** — installs to `%LOCALAPPDATA%\audock` and adds it to your user PATH:
+
+```powershell
+irm https://parth12358.github.io/Audock/install.ps1 | iex
+```
+
+Pin a version with `AUDOCK_VERSION=v0.2.0`, or pick the folder with `AUDOCK_INSTALL_DIR`.
+
+**By hand:** download your platform's file from [Releases](../../releases), rename it to `audock`
+(`audock.exe` on Windows), `chmod +x audock`, and move it into a folder on your PATH. If macOS
+blocks it, run `xattr -d com.apple.quarantine audock`. Intel Macs and ARM Linux have no prebuilt
+binary yet — clone the repo and run `tools/audock` (Python 3).
+
+Then run it from inside a vault, or point it at one:
+
+```sh
+audock init --dry-run                                # preview setup; writes nothing
+audock --vault /path/to/Vault query "embeddings"     # or: export AUDOCK_VAULT=/path/to/Vault
+```
+
+Outside a vault every command except `init` stops with an error rather than scanning the current
+folder. The binary carries its templates, so it works without this repo. Maintainers release with
+`git tag vX.Y.Z && git push origin vX.Y.Z` (CI runs the test suites before building).
 
 ## Obsidian setup
 

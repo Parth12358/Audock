@@ -621,9 +621,18 @@ check("N fixes", "notes/orph.md" in out.split("orphan notes")[1].split("under-li
 M.sys.frozen = True
 try:
     os.chdir(SB)
-    check("N fixes", M._resolve_vault(None) == Path.cwd().resolve(), "frozen fallback not cwd")
+    check("N fixes", M._resolve_vault(None) is None, "frozen binary outside a vault must not pick the cwd")
 finally:
     del M.sys.frozen
+
+# outside any vault, every command except init refuses (never scans an arbitrary tree)
+OUT = SB / "not-a-vault"; OUT.mkdir(exist_ok=True); (OUT / "random.md").write_text("---\ntype: note\n---\nzz\n")
+for cmd in (["query", "zz"], ["doctor"], ["reindex"], ["sql", "SELECT * FROM all"], ["context", "zz"]):
+    r = subprocess.run([str(AUDOCK), "--vault", str(OUT), *cmd], capture_output=True, text=True)
+    check("N fixes", r.returncode != 0 and "not an Audock vault" in r.stderr, f"{cmd}: {r.stderr[-160:]}")
+r = subprocess.run([str(AUDOCK), "query", "zz"], cwd=OUT, capture_output=True, text=True,
+                   env={**os.environ, "AUDOCK_VAULT": ""})
+check("N fixes", r.returncode != 0 or "not inside" in r.stderr or "zz" not in r.stdout, f"cwd fallback: {r.stdout[-160:]}")
 
 # ======================================================================================
 total_p = sum(p for p, f in RESULTS.values()); total_f = sum(f for p, f in RESULTS.values())

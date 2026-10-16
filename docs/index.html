@@ -78,6 +78,7 @@
     padding:15px 16px;color:#cfcfcf;font-size:12.75px;font-weight:300;line-height:1.95;
     white-space:pre-wrap;overflow-x:auto}
   .cmds .c{color:var(--dim)}
+  .hint code{color:var(--mut);font-family:var(--mono)}
 
   /* features as a definition list */
   dl{margin:0;display:grid;grid-template-columns:11rem 1fr;gap:1px 20px}
@@ -116,10 +117,11 @@
       <div class="bar"><b>set up with claude</b><button class="copy" data-t="p">copy</button></div>
       <pre id="p">Set up Audock — a Markdown knowledge base you maintain for me — in the current folder.
 
-1. Download the audock CLI for my OS from the latest release and put it on my PATH
-   (or at ./tools/audock): https://github.com/Parth12358/Audock/releases/latest
-   (macOS: audock-macos-arm64 · Linux: audock-linux-x86_64 · Windows: audock-windows-x86_64.exe).
-   On macOS/Linux, chmod +x it.
+1. Install the audock CLI and confirm `audock --help` works:
+   macOS/Linux: curl -fsSL https://parth12358.github.io/Audock/install.sh | sh
+   Windows (PowerShell): irm https://parth12358.github.io/Audock/install.ps1 | iex
+   If the installer says its folder isn't on my PATH, add it for this session and tell me
+   how to make that permanent.
 2. Run `audock init` here. If this is already an Obsidian vault, run `audock init --dry-run`
    first and show me — it's additive and never overwrites my files.
 3. Read the CLAUDE.md it creates and follow it from now on: before answering a factual
@@ -141,16 +143,25 @@
       <a class="row" href="https://github.com/Parth12358/Audock/releases/latest/download/audock-windows-x86_64.exe">
         <span class="os">Windows</span><span class="file">audock-windows-x86_64.exe</span><span class="get">download</span></a>
     </div>
-    <p class="hint">Standalone binary — no Python. One file, zero dependencies.</p>
+    <p class="hint">Standalone binary — no Python, no dependencies. The macOS build is for Apple silicon.</p>
   </section>
 
   <section>
-    <p class="lbl">Or by hand</p>
-    <div class="cmds"><span class="c"># in a new or existing Obsidian vault</span>
-chmod +x audock && mv audock /usr/local/bin/
+    <p class="lbl">Or from a terminal</p>
+    <div class="cmds"><span class="c"># macOS and Linux: installs to ~/.local/bin, no sudo</span>
+curl -fsSL https://parth12358.github.io/Audock/install.sh | sh
+
+<span class="c"># Windows (PowerShell)</span>
+irm https://parth12358.github.io/Audock/install.ps1 | iex
+
+<span class="c"># then, in a new or existing Obsidian vault</span>
 audock init --dry-run        <span class="c"># preview; writes nothing</span>
 audock init
 audock context "your question"</div>
+    <p class="hint">Used a download button instead? Rename the file to <code>audock</code>
+      (<code>audock.exe</code> on Windows), run <code>chmod +x audock</code>, and move it into a folder
+      on your PATH. If macOS blocks it, run <code>xattr -d com.apple.quarantine audock</code>.
+      Intel Macs and ARM Linux: run <code>tools/audock</code> from a clone of the repo (needs Python 3).</p>
   </section>
 
   <section>

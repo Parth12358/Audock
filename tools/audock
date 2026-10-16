@@ -49,14 +49,29 @@ def _resolve_vault(explicit=None):
         return Path(env).resolve()
     cur = Path.cwd().resolve()
     for d in [cur, *cur.parents]:
-        if (d / "notes").is_dir() and (d / "sources").is_dir():
+        if _is_vault(d):
             return d
-    if getattr(sys, "frozen", False):  # release binary: its own path is a temp dir
-        return cur
-    try:
-        return Path(__file__).resolve().parent.parent
-    except NameError:
-        return cur
+    if not getattr(sys, "frozen", False):  # in-repo script: <vault>/tools/audock
+        try:
+            here = Path(__file__).resolve().parent.parent
+            if _is_vault(here):
+                return here
+        except NameError:
+            pass
+    return None  # no vault found — never fall back to scanning an arbitrary directory
+
+
+def _is_vault(d):
+    return (d / "notes").is_dir() and (d / "sources").is_dir()
+
+
+def _prog():
+    """How to tell the user to invoke us: `audock` for the installed binary/PATH install,
+    the relative script path when run from a vault checkout."""
+    if getattr(sys, "frozen", False):
+        return "audock"
+    a = sys.argv[0] if sys.argv and sys.argv[0] else "audock"
+    return a if ("/" in a and not os.path.isabs(a)) else "audock"
 KIND_TO_DIR = {
     "conversation": "conversations",
     "code": "code",
@@ -415,8 +430,8 @@ def cmd_ingest(args):
     print(f"captured {out.relative_to(VAULT)}")
     print(f"source id: {source_id}")
     _journal(f"ingest({kind})", f"{title} ([[{source_id}]])")
-    print(f"next: check for an existing note first  →  tools/audock similar \"{title}\"")
-    print("then distill: tools/audock new note \"<Concept>\"  and set "
+    print(f"next: check for an existing note first  →  {_prog()} similar \"{title}\"")
+    print(f"then distill: {_prog()} new note \"<Concept>\"  and set "
           f"sources: [\"[[{source_id}]]\"]")
 
 
@@ -1785,6 +1800,13 @@ def cmd_init(args):
 
 
 def main():
+    # Windows: redirected output defaults to a legacy code page, and printing ✓/→/— would
+    # crash with UnicodeEncodeError. Always emit UTF-8 (never fail on a stray character).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="audock", description="Audock vault librarian")
     ap.add_argument("--vault", help="vault root (else $AUDOCK_VAULT or nearest ancestor)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1872,6 +1894,13 @@ def main():
     args = ap.parse_args()
     global VAULT
     VAULT = _resolve_vault(args.vault)
+    if VAULT is None and args.cmd != "init":
+        sys.exit("error: not inside an Audock vault (no notes/ and sources/ folders found here or "
+                 "above).\n  cd into your vault, pass --vault <path>, set AUDOCK_VAULT, or create "
+                 f"one with `{_prog()} init`.")
+    if VAULT is not None and not _is_vault(VAULT) and args.cmd != "init":
+        sys.exit(f"error: {VAULT} is not an Audock vault (missing notes/ or sources/). "
+                 f"Run `{_prog()} init {VAULT}` first.")
     args.func(args)
 
 

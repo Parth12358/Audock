@@ -82,3 +82,11 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  install-check:
+    name: verify install guide
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/install-check.yml
+    with:
+      version: ${{ github.ref_name }}

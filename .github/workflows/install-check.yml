@@ -1,0 +1,80 @@
+name: install-check
+
+# Follows the published installation guide on each OS against a real release: run the
+# installer, then a first session (init, ingest, note, reindex, query, sql, doctor), and check
+# that commands outside a vault refuse instead of scanning the current folder.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to install (e.g. v0.2.1) or 'latest'"
+        default: latest
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: latest
+
+jobs:
+  unix:
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with docs/install.sh (as `curl … | sh` would)
+        env:
+          AUDOCK_VERSION: ${{ inputs.version }}
+        run: cat docs/install.sh | sh
+      - name: First session
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          audock --help >/dev/null
+          mkdir -p "$RUNNER_TEMP/vault" && cd "$RUNNER_TEMP/vault"
+          audock init --dry-run
+          test -z "$(ls -A)"                       # dry-run wrote nothing
+          audock init
+          printf 'BM25 ranks notes by rarity.\r\n' > in.txt
+          audock ingest in.txt --type manual --title "ranking fact"
+          audock new note "BM25 ranking"
+          audock reindex
+          audock context "how are notes ranked" | grep -qi "bm25"
+          audock sql "SELECT title FROM notes" | grep -q "1 row"
+          audock doctor
+          cd "$RUNNER_TEMP"
+          if audock query x 2>err.txt; then echo "should refuse outside a vault"; exit 1; fi
+          grep -q "not inside an Audock vault" err.txt
+
+  windows:
+    name: install (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with docs/install.ps1 (as `irm … | iex` would)
+        shell: pwsh
+        env:
+          AUDOCK_VERSION: ${{ inputs.version }}
+        run: Get-Content docs/install.ps1 -Raw | Invoke-Expression
+      - name: First session
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:Path = "$env:Path;$env:LOCALAPPDATA\audock"
+          function Run { & audock @args; if ($LASTEXITCODE -ne 0) { throw "audock $args failed" } }
+          $v = Join-Path $env:RUNNER_TEMP "vault"; New-Item -ItemType Directory -Force $v | Out-Null; Set-Location $v
+          Run init --dry-run
+          if ((Get-ChildItem -Force $v).Count -ne 0) { throw "dry-run wrote files" }
+          Run init
+          Set-Content -Path in.txt -Value "BM25 ranks notes by rarity." -NoNewline
+          Run ingest in.txt --type manual --title "ranking fact"
+          Run new note "BM25 ranking"
+          Run reindex
+          $out = & audock context "how are notes ranked"; if (-not ($out -match "BM25")) { throw "context missed" }
+          Run doctor
+          Set-Location $env:RUNNER_TEMP
+          & audock query x 2>$null; if ($LASTEXITCODE -eq 0) { throw "should refuse outside a vault" }
