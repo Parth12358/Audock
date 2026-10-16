@@ -1500,23 +1500,24 @@ def cmd_init(args):
             gp.write_text(json.dumps(EMB_GRAPH, indent=2), encoding="utf-8")
         created.append(".obsidian/graph.json")
 
-    # community-plugins.json — ensure dataview is listed, preserving any existing plugins
+    # community-plugins.json — ensure recommended plugins are listed, preserving existing ones:
+    # dataview (tables), omnisearch (fuzzy search), smart-connections (local semantic search —
+    # the bolt-on for the embeddings Audock defers).
+    want_plugins = ["dataview", "omnisearch", "smart-connections"]
     cp = target / ".obsidian" / "community-plugins.json"
     if cp.exists():
         try:
             lst = json.loads(read(cp))
         except Exception:  # noqa: BLE001
             lst = []
-        if "dataview" not in lst:
-            if not dry:
-                lst.append("dataview")
-                cp.write_text(json.dumps(lst), encoding="utf-8")
-            created.append(".obsidian/community-plugins.json (+dataview, existing kept)")
-        else:
-            skipped.append(".obsidian/community-plugins.json")
+        added_p = [x for x in want_plugins if x not in lst]
+        if added_p and not dry:
+            cp.write_text(json.dumps(lst + added_p), encoding="utf-8")
+        (created if added_p else skipped).append(
+            f".obsidian/community-plugins.json (+{len(added_p)}, existing kept)")
     else:
         if not dry:
-            cp.write_text(json.dumps(["dataview"]), encoding="utf-8")
+            cp.write_text(json.dumps(want_plugins), encoding="utf-8")
         created.append(".obsidian/community-plugins.json")
 
     # tools/audock — copy the script in when running from the repo (self-contained vault)

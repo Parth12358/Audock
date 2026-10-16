@@ -89,8 +89,26 @@ a release with `git tag v0.1.0 && git push origin v0.1.0`.
 ## Obsidian setup
 
 1. Open this folder as a vault.
-2. Install the **Dataview** community plugin (already enabled in config) so the auto-lists in
-   `index.md`, `tags.md`, and the MOCs render. Static `[[wikilinks]]` work without it.
+2. Install the declared community plugins (in `.obsidian/community-plugins.json`):
+   - **Dataview** — renders the auto-lists in `index.md`, `tags.md`, and the MOCs. (Static
+     `[[wikilinks]]` and the lists `reindex` writes work without it.)
+   - **Omnisearch** — fuzzy full-text search in the Obsidian UI (optional).
+   - **Smart Connections** — local-embedding semantic search; the bolt-on for the embeddings
+     Audock deliberately defers (optional).
+   - **Obsidian Git** (recommended) — auto-commit/push so the vault stays versioned.
+3. The graph is auto-colored by domain — `reindex` regenerates one hue per MOC.
+
+## Backup (RAID-like local mirror)
+
+`tools/audock-backup <vault> [backup-root] [keep-days]` commits pending changes, mirrors the
+repo to a bare replica, and writes a dated git bundle (pruning old ones). Run it daily via cron:
+
+```sh
+30 2 * * *  /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
+```
+
+Restore any time: `git clone ~/.audock-backups/<vault>.git <dir>` (replica) or
+`git clone <snapshot>.bundle <dir>` (point-in-time).
 
 ## Everyday use
 
