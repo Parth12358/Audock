@@ -1,0 +1,13 @@
+filters:
+  and:
+    - note.status != "superseded"
+    - note.type == "note"
+views:
+  - type: table
+    name: "All notes"
+    order:
+      - file.name
+      - note.summary
+      - note.status
+      - note.updated
+    limit: 200

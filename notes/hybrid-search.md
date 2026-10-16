@@ -18,3 +18,11 @@ Lexical search nails exact terms; semantic search catches paraphrase. Successful
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-audock-retrieval-strategy|Audock retrieval strategy]]
+- [[20261016-information-retrieval|Information Retrieval]]
+- [[20261016-reciprocal-rank-fusion|Reciprocal Rank Fusion]]
+- [[20261016-skip-vectors-under-200k|Skip vectors under ~200K tokens]]
+<!-- AUDOCK:RELATED:END -->

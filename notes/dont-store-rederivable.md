@@ -18,3 +18,8 @@ Claude Code's auto-memory skips anything derivable from the codebase or already 
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-agentic-memory|Agentic Memory]]
+<!-- AUDOCK:RELATED:END -->

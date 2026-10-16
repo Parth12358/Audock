@@ -18,3 +18,9 @@ RRF fuses multiple result lists by position, scoring each item sum(1/(k+rank)) w
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-hybrid-search|Hybrid search]]
+- [[20261016-information-retrieval|Information Retrieval]]
+<!-- AUDOCK:RELATED:END -->

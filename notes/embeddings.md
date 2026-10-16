@@ -21,3 +21,10 @@ source capture; delete it once you have real content.
 
 ## Log
 - 2026-10-15 — created from [[20261016T051857-embeddings-note]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261015-machine-learning|Machine Learning]]
+- [[20261016-audock|Audock (the system)]]
+- [[20261016-two-layer-store|Two-layer store]]
+<!-- AUDOCK:RELATED:END -->

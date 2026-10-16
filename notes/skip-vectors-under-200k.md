@@ -18,3 +18,10 @@ Anthropic's guidance: contextual embeddings only pay off beyond ~200K tokens; un
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-audock-retrieval-strategy|Audock retrieval strategy]]
+- [[20261016-hybrid-search|Hybrid search]]
+- [[20261016-information-retrieval|Information Retrieval]]
+<!-- AUDOCK:RELATED:END -->

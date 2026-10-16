@@ -18,3 +18,8 @@ The classic Luhmann approach names each file by a timestamp UID. In practice thi
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-stable-note-ids|Stable note IDs]]
+<!-- AUDOCK:RELATED:END -->

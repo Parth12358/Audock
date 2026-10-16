@@ -18,3 +18,9 @@ A Map of Content (MOC) is a hand-curated hub that combines tag-like grouping, fo
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-knowledge-management|Knowledge Management]]
+- [[20261016-tags-vs-links|Tags vs links]]
+<!-- AUDOCK:RELATED:END -->

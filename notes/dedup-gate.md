@@ -18,3 +18,11 @@ On ingest, `audock similar` surfaces the most similar existing notes so the libr
 
 ## Log
 - 2026-10-16 — created from [[20261016T060100-audock-design-decisions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-atomic-notes|Atomic notes]]
+- [[20261016-audock|Audock (the system)]]
+- [[20261016-epistemic-status|Epistemic status]]
+- [[20261016-memory-write-policy|Memory write policy]]
+<!-- AUDOCK:RELATED:END -->

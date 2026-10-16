@@ -18,3 +18,13 @@ Audock answers from a cheap CLI probe: ripgrep candidates, word-boundary scoring
 
 ## Log
 - 2026-10-16 — created from [[20261016T060100-audock-design-decisions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-audock|Audock (the system)]]
+- [[20261016-contextual-retrieval|Contextual retrieval]]
+- [[20261016-hybrid-search|Hybrid search]]
+- [[20261016-lost-in-the-middle|Lost in the middle]]
+- [[20261016-skip-vectors-under-200k|Skip vectors under ~200K tokens]]
+- [[20261016-tiered-memory|Tiered memory]]
+<!-- AUDOCK:RELATED:END -->

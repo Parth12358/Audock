@@ -18,3 +18,10 @@ Audock separates `sources/` (byte-verbatim, immutable, append-only captures) fro
 
 ## Log
 - 2026-10-16 — created from [[20261016T060100-audock-design-decisions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-atomic-notes|Atomic notes]]
+- [[20261016-audock|Audock (the system)]]
+- [[20261016-lossless-storage|Lossless storage]]
+<!-- AUDOCK:RELATED:END -->

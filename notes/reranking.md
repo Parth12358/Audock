@@ -18,3 +18,11 @@ Retrieve ~20 candidates, then a cross-encoder rerank puts the answer-bearing pas
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-contextual-retrieval|Contextual retrieval]]
+- [[20261016-hybrid-search|Hybrid search]]
+- [[20261016-information-retrieval|Information Retrieval]]
+- [[20261016-lost-in-the-middle|Lost in the middle]]
+<!-- AUDOCK:RELATED:END -->

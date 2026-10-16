@@ -18,3 +18,10 @@ Nothing is ever destroyed: `sources/` bodies are immutable (hash-verified), note
 
 ## Log
 - 2026-10-16 — created from [[20261016T060100-audock-design-decisions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-audock|Audock (the system)]]
+- [[20261016-markdown-as-source-of-truth|Markdown as source of truth]]
+- [[20261016-two-layer-store|Two-layer store]]
+<!-- AUDOCK:RELATED:END -->

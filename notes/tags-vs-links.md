@@ -19,3 +19,8 @@ Only `[[links]]` create graph edges; `#tags` do not. So a parallel hierarchical 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
 - 2026-10-16 — created from [[20261016T060200-obsidian-naming-conventions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-knowledge-management|Knowledge Management]]
+<!-- AUDOCK:RELATED:END -->

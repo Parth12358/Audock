@@ -19,3 +19,9 @@ Links keyed on filenames break when a note is renamed. The durable pattern is an
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
 - 2026-10-16 — created from [[20261016T060200-obsidian-naming-conventions]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-knowledge-management|Knowledge Management]]
+- [[20261016-timestamp-filenames|Pure timestamp filenames]]
+<!-- AUDOCK:RELATED:END -->

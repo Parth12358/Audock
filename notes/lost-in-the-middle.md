@@ -18,3 +18,10 @@ Retrieval quality degrades when the relevant passage sits in the middle of a lon
 
 ## Log
 - 2026-10-16 — created from [[20261016T060000-kb-and-memory-systems-research]]
+
+## Related
+<!-- AUDOCK:RELATED:BEGIN -->
+- [[20261016-audock-retrieval-strategy|Audock retrieval strategy]]
+- [[20261016-information-retrieval|Information Retrieval]]
+- [[20261016-reranking|Reranking]]
+<!-- AUDOCK:RELATED:END -->

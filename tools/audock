@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """audock — the Audock vault librarian CLI.
 
-Zero required dependencies. Uses ripgrep for fast search if present, else falls back to a
-pure-Python scan. The vault root is found via --vault, then $AUDOCK_VAULT, then the nearest
-ancestor of the CWD containing notes/ & sources/, then this script's parent dir — so the
-in-repo script and a released standalone binary both work.
+Zero required dependencies, no external tools — a pure-Python BM25 scan (field-weighted, light
+stemming). The vault root is found via --vault, then $AUDOCK_VAULT, then the nearest ancestor of
+the CWD containing notes/ & sources/, then this script's parent dir — so the in-repo script and a
+released standalone binary both work.
 
 Commands:
   init [path] [--dry-run]                          scaffold Audock into a new/existing vault
   new note|source|moc "Title"                      scaffold a file from a template
   ingest <file|url|-> --type KIND [--title ..] [--ref ..]   capture raw material into sources/
   context "question" [--tag T] [--k N] [--all]     bounded answer pack (cheapest query)
-  query "text" [--tag T] [--type T] [--since DATE] [--all] [--json]   ranked search
+  query "text" [--tag T] [--type T] [--since DATE] [--all] [--json]   ranked BM25 search
   similar "title"                                  top-k similar notes (dedup gate)
   show <id> [--body | --raw]                       one item; --raw = verbatim/lossless
+  backlinks <id>                                   notes/MOCs that link to this one
+  view <name> [--tag T] [--type T] [--status S]    emit an Obsidian Bases (.base) saved view
   log "message"                                    append a line to today's journal
-  reindex                                          rebuild tags.md + index.md maps list
-  doctor                                           hygiene report (links/orphans/dups/...)
+  reindex [--related]                              rebuild tags.md + index.md (+ Related blocks)
+  doctor                                           hygiene report (links/orphans/dups/tags/...)
 """
 import argparse
 import hashlib
+import math
 import os
 import re
+from collections import Counter
 import subprocess
 import sys
 import urllib.request
@@ -345,23 +349,42 @@ def cmd_ingest(args):
           f"sources: [\"[[{source_id}]]\"]")
 
 
-# Tiny stopword list so natural-language questions tokenize to meaningful terms.
+# ---------- ranking: field-weighted BM25 (Okapi) with light stemming ----------
+# BM25 adds term-rarity (IDF) + length normalization over naive term counts; field weights
+# make a hit in the title/summary count more than one in the body. Defaults k1=1.2, b=0.75.
 STOPWORDS = {
     "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "is", "are", "be", "do",
     "does", "how", "what", "why", "when", "which", "who", "that", "this", "with", "as", "by",
     "it", "its", "from", "at", "we", "i", "you", "can", "should", "would", "about", "into",
     "was", "were", "has", "have", "had", "will", "me", "my",
 }
+K1, B = 1.2, 0.75
+FIELD_W = {"title": 6, "summary": 4, "aliases": 3, "tags": 2, "body": 1}
 
 
-def _tokens(term):
-    """Split a query/question into meaningful search tokens (keeps `domain/ml` style tags)."""
-    out = []
-    for t in re.findall(r"[a-z0-9][a-z0-9/_-]*", term.lower()):
-        t = t.strip("/-_")
-        if len(t) >= 2 and t not in STOPWORDS:
-            out.append(t)
-    return out
+def _words(text):
+    """Lowercase alphanumeric words (splits `domain/ml` → domain, ml); drops stopwords."""
+    return [w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+            if len(w) >= 2 and w not in STOPWORDS]
+
+
+def _stem(w):
+    """Light suffix stripping so plurals/gerunds match (embeddings≈embedding; applies in order)."""
+    if len(w) > 4 and w.endswith("ies"):
+        w = w[:-3] + "y"
+    elif len(w) > 3 and w.endswith("es"):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    if len(w) > 5 and w.endswith("ing"):
+        w = w[:-3]
+    elif len(w) > 5 and w.endswith("ed"):
+        w = w[:-2]
+    return w
+
+
+def _terms(text):
+    return [_stem(w) for w in _words(text)]
 
 
 def _first_line(body):
@@ -372,99 +395,94 @@ def _first_line(body):
     return ""
 
 
-def _score(term, fm, body, path):
-    toks = _tokens(term)
-    if not toks:  # tag/type-only listing: neutral match so filters still return rows
-        return 1, _first_line(body)[:160]
-    title = str(fm.get("title", "")).lower()
-    summary = str(fm.get("summary", "")).lower()
-    aliases = " ".join(as_list(fm.get("aliases"))).lower()
-    tags = " ".join(as_list(fm.get("tags"))).lower()
-    body_l = body.lower()
-    name = path.name.lower()
-
-    def hits(token, text):  # word-boundary (prefix) match: `embedding` hits `embeddings`,
-        return len(re.findall(r"\b" + re.escape(token), text))  # but `thing` misses `everything`
-
-    score = 0
-    for t in toks:
-        if hits(t, title):
-            score += 10
-        if hits(t, summary):  # contextual-prefix lever: the authored one-liner ranks high
-            score += 8
-        if hits(t, aliases):
-            score += 6
-        if hits(t, tags):
-            score += 4
-        score += hits(t, body_l)
-        if hits(t, name):
-            score += 2
-    phrase = term.strip().lower()
-    if len(phrase) >= 4 and phrase in body_l:  # exact-phrase bonus keeps precision
-        score += 5
-    snippet = ""
+def _snippet(words, body):
     for line in body.split("\n"):
         ls = line.strip()
-        if ls and not ls.startswith(("---", "<!--")) and any(hits(t, ls.lower()) for t in toks):
-            snippet = ls
-            break
-    return score, (snippet or _first_line(body))[:160]
+        if ls and not ls.startswith(("---", "<!--")) and any(w in ls.lower() for w in words):
+            return ls[:160]
+    return _first_line(body)[:160]
 
 
-def _rg_candidates(term):
-    toks = _tokens(term)
-    if not toks:
-        return None
-    cmd = ["rg", "-l", "-i", "--glob", "*.md"]
-    for t in toks:  # multiple -e => OR semantics (recall across all tokens)
-        cmd += ["-e", re.escape(t)]
-    cmd.append(str(VAULT))
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True)
-        if out.returncode in (0, 1):
-            files = [Path(p) for p in out.stdout.splitlines() if p]
-            return [p for p in files if not any(part in SKIP_DIRS
-                    for part in p.relative_to(VAULT).parts)]
-    except FileNotFoundError:
-        return None
-    return None
+def _doc_bag(fm, body):
+    """Field-weighted stemmed term frequencies for one document."""
+    bag = Counter()
+    for t in _terms(fm.get("title", "")):
+        bag[t] += FIELD_W["title"]
+    for t in _terms(fm.get("summary", "")):
+        bag[t] += FIELD_W["summary"]
+    for t in _terms(" ".join(as_list(fm.get("aliases")))):
+        bag[t] += FIELD_W["aliases"]
+    for t in _terms(" ".join(as_list(fm.get("tags")))):
+        bag[t] += FIELD_W["tags"]
+    for t in _terms(body):
+        bag[t] += FIELD_W["body"]
+    return bag
 
 
-def _search(term, tag=None, type_=None, since=None, include_superseded=False):
-    """Rank vault files against `term` with optional filters. Returns list of dicts.
-    Journal entries are always excluded (activity log, not knowledge); superseded notes are
-    excluded unless include_superseded — so stale/contradicted notes don't surface by default."""
-    candidates = _rg_candidates(term)
-    files = candidates if candidates is not None else list(md_files())
-    results = []
-    for p in files:
+def _corpus(include_superseded=False):
+    """All indexed, searchable docs with their term bags (excludes docs with no type,
+    journal entries, and — unless asked — superseded notes)."""
+    docs = []
+    for p in md_files():
         fm, body = parse_frontmatter(read(p))
-        if not fm.get("type"):  # skip operational docs (CLAUDE.md, README.md); not knowledge
-            continue
-        if str(fm.get("type", "")) == "journal":
+        if not fm.get("type") or str(fm.get("type")) == "journal":
             continue
         if not include_superseded and str(fm.get("status", "")).lower() == "superseded":
             continue
+        docs.append((p, fm, body, _doc_bag(fm, body)))
+    return docs
+
+
+def _search(term, tag=None, type_=None, since=None, include_superseded=False):
+    """Field-weighted BM25 ranking with optional filters. Journal always excluded; superseded
+    excluded unless include_superseded. Filters are applied after corpus stats so IDF is stable."""
+    docs = _corpus(include_superseded)
+    n = len(docs) or 1
+    df = Counter()
+    total_len = 0
+    for _, _, _, bag in docs:
+        total_len += sum(bag.values())
+        for t in bag:
+            df[t] += 1
+    avgdl = total_len / n
+    qterms = set(_terms(term))
+    qwords = _words(term)
+    phrase = term.strip().lower()
+    results = []
+    for p, fm, body, bag in docs:
         if type_ and str(fm.get("type", "")) != type_:
             continue
         if tag and tag not in as_list(fm.get("tags")):
             continue
         if since:
-            stamp = str(fm.get("updated") or fm.get("created")
-                        or fm.get("captured") or "")[:10]
+            stamp = str(fm.get("updated") or fm.get("created") or fm.get("captured") or "")[:10]
             if stamp and stamp < since:
                 continue
-        score, snippet = _score(term, fm, body, p)
-        if score <= 0:
-            continue
+        if not qterms:  # tag/type-only listing → neutral match so filters still return rows
+            score = 1.0
+        else:
+            dl = sum(bag.values()) or 1
+            score = 0.0
+            for t in qterms:
+                f = bag.get(t, 0)
+                if not f:
+                    continue
+                idf = math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
+                score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * dl / avgdl))
+            # exact-phrase bonus for genuine multi-word phrases only; a single word relies on
+            # word-level term matching (substring here would match "thing" inside "everything").
+            if " " in phrase and phrase in body.lower():
+                score += 1.0
+            if score <= 0:
+                continue
         results.append({
             "path": str(p.relative_to(VAULT)),
             "id": fm.get("id", ""),
             "title": fm.get("title", ""),
             "type": fm.get("type", ""),
             "tags": as_list(fm.get("tags")),
-            "score": score,
-            "snippet": snippet,
+            "score": round(score, 2),
+            "snippet": _snippet(qwords, body),
         })
     results.sort(key=lambda r: (-r["score"], r["path"]))
     return results
@@ -585,6 +603,80 @@ def cmd_query(args):
         print(f"... {len(results) - args.limit} more (use --limit)")
 
 
+def _link_graph():
+    """Map each resolvable key (id/title/stem/alias, lowercased) -> list of (id, title, rel) of
+    the notes/MOCs that link to it. Sources (verbatim) and journal/generated files are not link
+    sources (incidental [[...]] in a capture is not a real edge)."""
+    incoming = {}
+    for p in md_files():
+        fm, body = parse_frontmatter(read(p))
+        if fm.get("type") in (None, "journal", "source"):
+            continue
+        rel = str(p.relative_to(VAULT))
+        if rel in GENERATED:
+            continue
+        src = (fm.get("id") or p.stem, fm.get("title") or p.stem, rel)
+        for tgt in _links(body):
+            incoming.setdefault(tgt.strip().lower(), []).append(src)
+    return incoming
+
+
+def _keys_of(p, fm):
+    keys = {str(fm.get("id", "")).lower(), str(fm.get("title", "")).lower(), p.stem.lower()}
+    keys |= {a.lower() for a in as_list(fm.get("aliases"))}
+    return {k for k in keys if k}
+
+
+def cmd_backlinks(args):
+    """Who links here — the notes/MOCs that reference this one (Claude- and grep-friendly)."""
+    hit = _resolve(args.id)
+    if not hit:
+        sys.exit(f"not found: {args.id}")
+    p, fm, body = hit
+    graph = _link_graph()
+    self_rel = str(p.relative_to(VAULT))
+    rows, seen = [], set()
+    for k in _keys_of(p, fm):
+        for sid, stitle, srel in graph.get(k, []):
+            if srel != self_rel and srel not in seen:
+                seen.add(srel)
+                rows.append((sid, stitle, srel))
+    if not rows:
+        print("no backlinks")
+        return
+    print(f"backlinks to {fm.get('title')} ([[{fm.get('id')}]]):")
+    for sid, stitle, srel in sorted(rows, key=lambda r: r[2]):
+        print(f"  [[{sid}|{stitle}]]  ({srel})")
+
+
+def cmd_view(args):
+    """Emit an Obsidian Bases (.base) saved view — a native, plugin-free interactive table.
+    Requires Obsidian 1.9+. Pure YAML; opens/edits against note frontmatter."""
+    import json
+    name = args.name
+    slug = slugify(name)
+    conds = []
+    if not args.all:
+        conds.append('note.status != "superseded"')
+    if args.tag:
+        conds.append(f'file.hasTag("{args.tag}")')
+    if args.type:
+        conds.append(f'note.type == "{args.type}"')
+    else:
+        conds.append('note.type == "note"')
+    if args.status:
+        conds.append(f'note.status == "{args.status}"')
+    filt = "\n".join(f"    - {c}" for c in conds)
+    base = (f"filters:\n  and:\n{filt}\n"
+            f"views:\n  - type: table\n    name: {json.dumps(name)}\n"
+            f"    order:\n      - file.name\n      - note.summary\n      - note.status\n"
+            f"      - note.updated\n    limit: 200\n")
+    out = VAULT / "bases" / f"{slug}.base"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(base, encoding="utf-8")
+    print(f"wrote {out.relative_to(VAULT)} (open it in Obsidian 1.9+ for a live table)")
+
+
 def _replace_block(text, begin, end, new_inner):
     pat = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.DOTALL)
     repl = f"{begin}\n{new_inner}\n{end}"
@@ -626,18 +718,48 @@ def cmd_reindex(args):
                        "<!-- AUDOCK:MAPS:END -->", maps_inner),
         encoding="utf-8",
     )
-    print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps")
+
+    # 3) optional: write an auto-maintained `## Related` (backlinks) block into each note
+    related_n = 0
+    if getattr(args, "related", False):
+        graph = _link_graph()
+        BEG, END = "<!-- AUDOCK:RELATED:BEGIN -->", "<!-- AUDOCK:RELATED:END -->"
+        for p in md_files(VAULT / "notes"):
+            fm, body = parse_frontmatter(read(p))
+            if fm.get("type") != "note":
+                continue
+            self_rel = str(p.relative_to(VAULT))
+            rows, seen = [], set()
+            for k in _keys_of(p, fm):
+                for sid, stitle, srel in graph.get(k, []):
+                    if srel != self_rel and srel not in seen:
+                        seen.add(srel)
+                        rows.append(f"- [[{sid}|{stitle}]]")
+            inner = "\n".join(sorted(rows)) if rows else "- (none)"
+            raw = read(p)
+            if BEG in raw:
+                new = _replace_block(raw, BEG, END, inner)
+            else:
+                new = raw.rstrip() + f"\n\n## Related\n{BEG}\n{inner}\n{END}\n"
+            if new != raw:
+                p.write_text(new, encoding="utf-8")
+                related_n += 1
+    tail = f", {related_n} related blocks" if getattr(args, "related", False) else ""
+    print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps{tail}")
 
 
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _INLINE_RE = re.compile(r"`[^`]*`")
+_RELATED_RE = re.compile(r"<!-- AUDOCK:RELATED:BEGIN -->.*?<!-- AUDOCK:RELATED:END -->", re.DOTALL)
 
 
 def _strip_noise(body):
-    """Drop code fences, HTML comments, and inline code so only real prose links remain.
-    Illustrative links in examples/templates/docs live in exactly those regions."""
+    """Drop the auto-generated Related block, code fences, HTML comments, and inline code so only
+    real authored prose links remain. The Related block is derived FROM backlinks, so counting it
+    would create reciprocal edges that mask orphans and feed on itself across reindexes."""
+    body = _RELATED_RE.sub("", body)
     body = _FENCE_RE.sub("", body)
     body = _COMMENT_RE.sub("", body)
     body = _INLINE_RE.sub("", body)
@@ -728,6 +850,14 @@ def cmd_doctor(args):
         if len(_links(body)) < 2:
             underlinked.append(rel)
 
+    # tag hygiene: tags that normalize to the same key (case/plural/_-/ variants) → merge
+    norm = {}
+    for _, fm in notes:
+        for tg in as_list(fm.get("tags")):
+            key = "/".join(_stem(seg) for seg in str(tg).lower().replace("_", "-").split("/"))
+            norm.setdefault(key, set()).add(tg)
+    tag_variants = {k: sorted(v) for k, v in norm.items() if len(v) > 1}
+
     # locked = human-owned; informational so you can see what Claude must not touch
     locked = [str(p.relative_to(VAULT)) for p, fm in notes
               if str(fm.get("locked", "")).lower() == "true" or "locked" in as_list(fm.get("tags"))]
@@ -743,8 +873,9 @@ def cmd_doctor(args):
     section("orphan notes (no backlinks)", orphans)
     section("under-linked notes (< 2 links)", underlinked)
     section("duplicate-title candidates", [f"{k}: {', '.join(v)}" for k, v in dups.items()])
+    section("tag variants (consider merging)", [f"{', '.join(v)}" for v in tag_variants.values()])
     section(f"stale notes (> {STALE_DAYS}d)", [f"{p} ({s})" for p, s in stale])
-    if not (broken or missing_src or orphans or underlinked or dups or stale):
+    if not (broken or missing_src or orphans or underlinked or dups or tag_variants or stale):
         print("\nall clear ✓")
 
 
@@ -1048,7 +1179,21 @@ def main():
     p_c.add_argument("--all", action="store_true", help="include superseded notes")
     p_c.set_defaults(func=cmd_context)
 
+    p_bl = sub.add_parser("backlinks", help="notes/MOCs that link to a given note")
+    p_bl.add_argument("id", help="id / title / alias / filename stem")
+    p_bl.set_defaults(func=cmd_backlinks)
+
+    p_v = sub.add_parser("view", help="emit an Obsidian Bases (.base) saved view (1.9+)")
+    p_v.add_argument("name")
+    p_v.add_argument("--tag")
+    p_v.add_argument("--type", choices=["note", "source", "moc", "entity"])
+    p_v.add_argument("--status", help="e.g. draft | stable")
+    p_v.add_argument("--all", action="store_true", help="include superseded")
+    p_v.set_defaults(func=cmd_view)
+
     p_r = sub.add_parser("reindex", help="rebuild tags.md + index.md maps list")
+    p_r.add_argument("--related", action="store_true",
+                     help="also write an auto-maintained ## Related (backlinks) block per note")
     p_r.set_defaults(func=cmd_reindex)
 
     p_d = sub.add_parser("doctor", help="orphans / broken links / dups / stale report")
