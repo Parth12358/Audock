@@ -47,6 +47,25 @@ Pure Python 3, no required dependencies (uses `ripgrep` if installed, else falls
 Python scan). Superseded notes are hidden from queries unless `--all`. Journal entries are an
 activity log, excluded from knowledge queries.
 
+### Set up in a new folder or an existing Obsidian vault
+
+```sh
+audock init /path/to/vault --dry-run   # preview — writes nothing
+audock init /path/to/vault             # apply
+```
+
+`init` is **additive and safe**: it creates the Audock folders/docs and merges graph color-groups
++ the Dataview entry into `.obsidian/`, but **never overwrites your existing files or config** and
+never touches your existing notes. Run it inside an Obsidian vault to Audock-ify it in place. (Or
+just ask Claude — the **audock-setup** skill runs this for you, dry-run first.)
+
+### Human-owned notes (Claude won't touch them)
+
+Mark any note you own with `locked: true` in frontmatter (or tag it `#locked`), or fence a region
+with `<!-- audock:human -->` … `<!-- /audock:human -->`. The librarian protocol makes Claude treat
+these as **read-only** — it may read, cite, and link to them, but never edit, supersede, move, or
+delete them. `audock doctor` reports how many notes are locked.
+
 ### Install (standalone binary)
 
 No Python needed — grab a prebuilt `audock` for macOS / Linux / Windows from the repo's

@@ -25,6 +25,13 @@ whole `.md` files into context is what costs tokens — so probe first, read las
 
 ## Invariants (never violate)
 
+0. **Human-owned content is read-only.** Never edit, supersede, move, rename, or delete any note
+   with `locked: true` in its frontmatter (or tagged `#locked`). Treat it as the human's own.
+   You may *read, cite, and link to* it. If it seems wrong or outdated, surface that to the human
+   and propose a change — do not make it. New knowledge on the same topic → a separate note that
+   links to the locked one. The same applies to any region fenced by
+   `<!-- audock:human -->` … `<!-- /audock:human -->` inside an otherwise editable note: leave
+   everything between those markers exactly as-is.
 1. **`sources/` is append-only and immutable.** Once a capture file is written, never edit its
    body. New facts about the same source → a new note or a `## Log` entry, never a rewrite.
 2. **Notes are additive.** To change an existing note, append a dated line to its `## Log` and

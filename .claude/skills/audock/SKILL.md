@@ -10,6 +10,9 @@ live). `CLAUDE.md` holds the full protocol and invariants — follow them exactl
 the quick operator's cheat-sheet.
 
 ## Invariants (never break)
+- **Human-owned is read-only:** never edit, supersede, move, or delete a note with `locked: true`
+  (or tagged `#locked`), nor anything inside `<!-- audock:human -->` … `<!-- /audock:human -->`.
+  Read/cite/link only; new knowledge → a separate note linking to it.
 - `sources/` bodies are **immutable, append-only** — never rewrite a capture (only its
   `distilled_into:` frontmatter may be appended to).
 - Notes change **additively**: append a dated `## Log` line and bump `updated:`; never delete.

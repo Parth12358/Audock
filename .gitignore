@@ -2,6 +2,9 @@
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
 .obsidian/cache
+.obsidian/plugins/
+.obsidian/appearance.json
+.obsidian/hotkeys.json
 .trash/
 
 # OS / editor noise

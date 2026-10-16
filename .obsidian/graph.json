@@ -9,19 +9,31 @@
   "colorGroups": [
     {
       "query": "path:notes/",
-      "color": { "a": 1, "rgb": 5016575 }
+      "color": {
+        "a": 1,
+        "rgb": 5016575
+      }
     },
     {
       "query": "path:sources/",
-      "color": { "a": 1, "rgb": 14722136 }
+      "color": {
+        "a": 1,
+        "rgb": 14722136
+      }
     },
     {
       "query": "path:maps/",
-      "color": { "a": 1, "rgb": 5752197 }
+      "color": {
+        "a": 1,
+        "rgb": 5752197
+      }
     },
     {
       "query": "file:index OR file:tags",
-      "color": { "a": 1, "rgb": 14703194 }
+      "color": {
+        "a": 1,
+        "rgb": 14703194
+      }
     }
   ],
   "collapse-display": true,
@@ -34,6 +46,6 @@
   "repelStrength": 11,
   "linkStrength": 1,
   "linkDistance": 260,
-  "scale": 1,
+  "scale": 0.8320378926792329,
   "close": false
 }
