@@ -671,8 +671,9 @@ def cmd_doctor(args):
         rel = str(p.relative_to(VAULT))
         if fm.get("type") == "note":
             notes.append((p, fm))
-        # Generated indexes and the journal list/mention notes but aren't semantic backlinks.
-        if rel in GENERATED or fm.get("type") == "journal":
+        # Generated indexes and the journal list/mention notes but aren't semantic backlinks;
+        # source bodies are verbatim captures (any [[...]] in them is incidental, not a link).
+        if rel in GENERATED or fm.get("type") in ("journal", "source"):
             continue
         for target in _links(body):
             tgt = target.strip()
