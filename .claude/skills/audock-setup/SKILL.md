@@ -7,7 +7,7 @@ description: Set up / bootstrap Audock into a folder or an EXISTING Obsidian vau
 
 Bootstrap Audock into a target folder (a new dir, or someone's existing Obsidian vault). It is
 **additive and safe**: existing files and `.obsidian/` config are preserved; only missing pieces
-are created and graph color-groups / the Dataview entry are merged in.
+are created and graph color-groups and the Dataview, Omnisearch and Smart Connections plugin entries are merged in.
 
 ## Steps
 
