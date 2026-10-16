@@ -19,3 +19,6 @@ build/
 dist/
 *.spec
 audock_cli.py
+
+# Smart Connections embedding cache (rebuildable; keep out of git/backups)
+.smart-env/

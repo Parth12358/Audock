@@ -23,6 +23,7 @@ Commands:
 """
 import argparse
 import hashlib
+import json
 import math
 import os
 import re
@@ -100,9 +101,17 @@ def read(p):
 # ---------- minimal frontmatter parser (no PyYAML needed) ----------
 
 def _strip_q(v):
+    """Unquote a YAML scalar. Double-quoted values honor escapes (\\", \\\\, \\uXXXX — JSON's escape
+    set is a subset of YAML's); single-quoted values unescape '' to '."""
     v = v.strip()
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        try:
+            out = json.loads(v)
+            return out if isinstance(out, str) else v[1:-1]
+        except ValueError:
+            return v[1:-1]
+    if len(v) >= 2 and v[0] == v[-1] == "'":
+        return v[1:-1].replace("''", "'")
     return v
 
 
@@ -135,6 +144,7 @@ def _split_inline_list(inner):
 def parse_frontmatter(text):
     """Return (dict, body). Tolerant of scalars, inline [lists], and block - lists."""
     text = text.lstrip("﻿")  # tolerate a UTF-8 BOM (Windows editors) — else frontmatter hides
+    text = text.replace("\r\n", "\n")  # CRLF files parse the same as LF
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return {}, text
@@ -228,7 +238,7 @@ def write_new(path, content, force=False):
     if path.exists() and not force:
         sys.exit(f"error: {path.relative_to(VAULT)} already exists (use a different title)")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_bytes(content.encode("utf-8"))  # no newline translation on any OS
     return path
 
 
@@ -294,32 +304,64 @@ def cmd_new(args):
     _journal(f"new {args.kind}", f"{title} ({path.relative_to(VAULT)})")
 
 
+MAX_FETCH = 8_000_000  # bytes; larger pages are refused rather than silently truncated
+
+
+def _check_host(host):
+    """SSRF guard. Refuse a host if ANY address it resolves to (IPv4 or IPv6) is not public
+    internet space. Fails closed: an unresolvable host is an error, not a pass."""
+    import ipaddress
+    import socket
+    if not host:
+        sys.exit("error: URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        sys.exit(f"error: cannot resolve {host}: {e}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            sys.exit(f"error: refused to fetch {host}: it resolves to non-public address {ip}")
+
+
+def _fetch_url(src):
+    """Fetch a URL for ingest. Every redirect hop is re-checked by the SSRF guard, and any
+    failure (refusal, network error, oversize page) exits non-zero. Nothing is captured on
+    failure, because sources/ is append-only and a bogus capture could never be fixed."""
+    import urllib.parse
+
+    class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            _check_host(urllib.parse.urlparse(newurl).hostname)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    _check_host(urllib.parse.urlparse(src).hostname)
+    opener = urllib.request.build_opener(_GuardedRedirects)
+    req = urllib.request.Request(src, headers={"User-Agent": "audock/1.0"})
+    try:
+        with opener.open(req, timeout=20) as r:
+            data = r.read(MAX_FETCH + 1)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"error: could not fetch {src}: {e}")
+    if len(data) > MAX_FETCH:
+        sys.exit(f"error: {src} is larger than {MAX_FETCH} bytes; refusing a truncated capture")
+    return data.decode("utf-8", errors="replace")
+
+
 def _load_body(src, kind):
     """Return (body_text, origin_ref) for ingest input."""
     if src == "-":
-        return sys.stdin.read(), "stdin"
-    if re.match(r"^https?://", src):
-        import ipaddress
-        import socket
-        import urllib.parse
-        host = urllib.parse.urlparse(src).hostname or ""
-        try:  # SSRF guard: refuse internal/metadata addresses
-            ip = ipaddress.ip_address(socket.gethostbyname(host))
-            if (ip.is_private or ip.is_loopback or ip.is_link_local
-                    or ip.is_reserved or ip.is_multicast):
-                return f"(refused to fetch {src}: resolves to a non-public address)", src
-        except (socket.gaierror, ValueError):
-            pass
-        try:
-            req = urllib.request.Request(src, headers={"User-Agent": "audock/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                raw = r.read(8_000_000).decode("utf-8", errors="replace")  # 8 MB cap, no OOM
-            return raw, src
-        except Exception as e:  # noqa: BLE001 — capture reference even if fetch fails
-            return f"(could not fetch {src}: {e})", src
+        # bytes, not text mode: text mode may translate newlines and break byte-verbatim capture
+        return sys.stdin.buffer.read().decode("utf-8", errors="replace"), "stdin"
+    if re.match(r"^https?://", src, re.I):
+        return _fetch_url(src), src
     p = Path(src)
     if p.exists():
-        return p.read_text(encoding="utf-8", errors="replace"), str(p)
+        return p.read_bytes().decode("utf-8", errors="replace"), str(p)  # keep \r\n verbatim
     sys.exit(f"error: no such file/url: {src}")
 
 
@@ -386,10 +428,14 @@ def _stem(w):
     """Light suffix stripping so plurals/gerunds match (embeddings≈embedding; applies in order)."""
     if len(w) > 4 and w.endswith("ies"):
         w = w[:-3] + "y"
-    elif len(w) > 3 and w.endswith("es"):
-        w = w[:-2]
-    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
-        w = w[:-1]
+    else:
+        # "-es" is a plural ending only after s/x/z/ch/sh (boxes, buses, matches); otherwise the
+        # "e" belongs to the word (notes → note). Words ending in -ss/-us/-is keep their s
+        # (class, status, analysis), so singular and plural stem identically.
+        if len(w) > 4 and w.endswith("es") and w[:-2].endswith(("s", "x", "z", "ch", "sh")):
+            w = w[:-2]
+        if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+            w = w[:-1]
     if len(w) > 5 and w.endswith("ing"):
         w = w[:-3]
     elif len(w) > 5 and w.endswith("ed"):
@@ -527,7 +573,9 @@ def cmd_show(args):
         sys.exit(f"not found: {args.id}")
     p, fm, body = hit
     if args.raw:
-        sys.stdout.write(read(p))
+        sys.stdout.flush()
+        sys.stdout.buffer.write(p.read_bytes())  # exact bytes on disk
+        sys.stdout.buffer.flush()
         return
     clean = _compact_body(body)
     if args.body:
@@ -701,24 +749,70 @@ GRAPH_PALETTE = [0x4C8DFF, 0x57C785, 0xE0A458, 0xA66BE0, 0xE05A8A, 0x4FC3C7,
                  0xE0C040, 0xF07178, 0x9CCC65, 0x7E9CFF, 0xD98A5B, 0x5BC0BE]
 
 
-def _apply_graph_colors(slugs):
-    """Regenerate .obsidian/graph.json colorGroups: one hue per domain (MOC) so the graph is
-    colored by group automatically, plus de-emphasized sources and accented index/tags. Other
-    graph settings (zoom, forces) are preserved."""
+_MOC_FROM_RE = re.compile(r"\bFROM\s+#([\w/\-]+)", re.I)
+# Queries older Audock versions / `init` wrote; always treated as Audock-managed.
+_LEGACY_GRAPH_QUERIES = {"path:notes/", "path:sources/", "path:maps/", "file:index OR file:tags"}
+
+
+def _moc_domain_tags(moc_paths):
+    """The tag each MOC stands for: its Dataview `FROM #tag` if present, else the most common
+    tag among the notes it links to, else its filename. Returns sorted unique tags."""
+    tag_of = {}
+    for p in md_files(VAULT / "notes"):
+        fm, _ = parse_frontmatter(read(p))
+        tags = [t for t in as_list(fm.get("tags")) if t != "moc"]
+        for k in _keys_of(p, fm):
+            tag_of[k] = tags
+    out = set()
+    for p in moc_paths:
+        fm, body = parse_frontmatter(read(p))
+        m = _MOC_FROM_RE.search(body)
+        if m:
+            out.add(m.group(1))
+            continue
+        counts = Counter(t for tgt in _links(body) for t in tag_of.get(tgt.strip().lower(), []))
+        out.add(counts.most_common(1)[0][0] if counts else p.stem)
+    return sorted(out)
+
+
+def _apply_graph_colors(moc_paths):
+    """Color the Obsidian graph by domain: one hue per MOC's tag, plus maps, sources, and
+    index/tags. Only groups Audock itself manages are replaced (tracked in
+    .obsidian/audock-graph.json); the user's own groups and every other graph setting are kept.
+    An unparseable graph.json is left alone. Returns the number of managed groups written."""
     import json
-    gp = VAULT / ".obsidian" / "graph.json"
+    ob = VAULT / ".obsidian"
+    if not ob.is_dir():
+        return 0  # not an Obsidian vault; don't create config
+    gp, side = ob / "graph.json", ob / "audock-graph.json"
+    if gp.exists():
+        try:
+            g = json.loads(read(gp))
+            if not isinstance(g, dict):
+                raise ValueError("graph.json is not an object")
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: leaving .obsidian/graph.json untouched (cannot parse: {e})",
+                  file=sys.stderr)
+            return 0
+    else:
+        g = {k: v for k, v in EMB_GRAPH.items() if k != "colorGroups"}
     try:
-        g = json.loads(read(gp)) if gp.exists() else dict(EMB_GRAPH)
+        managed = set(json.loads(read(side))) if side.exists() else set()
     except Exception:  # noqa: BLE001
-        g = dict(EMB_GRAPH)
-    groups = [{"query": f"tag:#{s}", "color": {"a": 1, "rgb": GRAPH_PALETTE[i % len(GRAPH_PALETTE)]}}
-              for i, s in enumerate(sorted(set(slugs)))]
-    groups.append({"query": "path:sources/", "color": {"a": 1, "rgb": 0x8A8F98}})
-    groups.append({"query": "file:index OR file:tags", "color": {"a": 1, "rgb": 0xE05A5A}})
-    g["colorGroups"] = groups
-    gp.parent.mkdir(parents=True, exist_ok=True)
+        managed = set()
+    managed |= _LEGACY_GRAPH_QUERIES
+    ours = [{"query": f"tag:#{t}", "color": {"a": 1, "rgb": GRAPH_PALETTE[i % len(GRAPH_PALETTE)]}}
+            for i, t in enumerate(_moc_domain_tags(moc_paths))]
+    ours += [{"query": "path:maps/", "color": {"a": 1, "rgb": 0xC8C8C8}},
+             {"query": "path:sources/", "color": {"a": 1, "rgb": 0x8A8F98}},
+             {"query": "file:index OR file:tags", "color": {"a": 1, "rgb": 0xE05A5A}}]
+    ours_q = {grp["query"] for grp in ours}
+    keep = [grp for grp in (g.get("colorGroups") or [])
+            if isinstance(grp, dict) and grp.get("query") not in managed | ours_q]
+    g["colorGroups"] = keep + ours
     gp.write_text(json.dumps(g, indent=2), encoding="utf-8")
-    return len(groups)
+    side.write_text(json.dumps(sorted(ours_q)), encoding="utf-8")
+    return len(ours)
 
 
 def cmd_reindex(args):
@@ -742,11 +836,11 @@ def cmd_reindex(args):
     )
 
     # 2) index.md maps list
-    maps, moc_slugs = [], []
+    maps, moc_paths = [], []
     for p in md_files(VAULT / "maps"):
         fm, _ = parse_frontmatter(read(p))
         maps.append((fm.get("title") or p.stem, fm.get("id") or p.stem))
-        moc_slugs.append(p.stem)
+        moc_paths.append(p)
     maps_inner = ("\n".join(f"- [[{mid}|{title}]]" for title, mid in sorted(maps))
                   if maps else "- (none yet)")
     index_path = VAULT / "index.md"
@@ -782,7 +876,7 @@ def cmd_reindex(args):
                 p.write_text(new, encoding="utf-8")
                 related_n += 1
     # 4) auto-color graph groups by domain (one hue per MOC)
-    ncolors = _apply_graph_colors(moc_slugs)
+    ncolors = _apply_graph_colors(moc_paths)
     tail = f", {related_n} related blocks" if getattr(args, "related", False) else ""
     print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps, {ncolors} graph colors{tail}")
 
@@ -958,6 +1052,27 @@ def _split_outside_quotes(s, sep_re):
     return out
 
 
+def _find_outside_quotes(s, rx):
+    """First match of `rx` that starts outside single/double quotes, or None."""
+    i, q = 0, None
+    while i < len(s):
+        c = s[i]
+        if q:
+            if c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        else:
+            m = rx.match(s, i)
+            if m:
+                return m
+        i += 1
+    return None
+
+
+_RE_KW_WHERE = re.compile(r"\s*\bWHERE\b\s*", re.I)
+_RE_KW_ORDER = re.compile(r"\s*\bORDER\s+BY\b\s*", re.I)
+_RE_KW_LIMIT = re.compile(r"\s*\bLIMIT\b\s*", re.I)
 _RE_OR = re.compile(r"\s+OR\s+", re.I)
 _RE_AND = re.compile(r"\s+AND\s+", re.I)
 _RE_WHERE = re.compile(r"\s+WHERE\s+", re.I)
@@ -1083,25 +1198,38 @@ def _match(p, fm, body, graph, conds):
 
 
 def _set_fm_field(raw, key, value_str):
-    lines = raw.split("\n")
+    """Set one frontmatter key in place. Preserves a UTF-8 BOM and CRLF line endings, and
+    removes the old value's continuation lines (indented, or an unindented `- item` block list)
+    so the result stays valid YAML. Returns `raw` unchanged if there is no frontmatter."""
+    bom = "﻿" if raw.startswith("﻿") else ""
+    body = raw[len(bom):]
+    lines = body.split("\n")
     if not lines or lines[0].strip() != "---":
         return raw
     close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
     if close is None:
         return raw
-    pat = re.compile(rf"^{re.escape(key)}\s*:\s*.*$")
+    cr = "\r" if lines[0].endswith("\r") else ""
+    new_line = f"{key}: {value_str}{cr}"
+    pat = re.compile(rf"^{re.escape(key)}\s*:(.*)$")
     for i in range(1, close):
-        if pat.match(lines[i]):
-            # consume any following indented continuation / block-list lines that belong to this
-            # key, so replacing `aliases:` (block list) doesn't leave dangling `  - x` → broken YAML
+        m = pat.match(lines[i].rstrip("\r"))
+        if m:
+            empty_val = m.group(1).strip() == ""
             j = i + 1
-            while j < close and lines[j][:1] in (" ", "\t") and lines[j].strip():
-                j += 1
+            while j < close:
+                ln = lines[j].rstrip("\r")
+                if not ln.strip():
+                    break
+                if ln[:1] in (" ", "\t") or (empty_val and re.match(r"^-(\s|$)", ln)):
+                    j += 1
+                    continue
+                break
             del lines[i + 1:j]
-            lines[i] = f"{key}: {value_str}"
-            return "\n".join(lines)
-    lines.insert(close, f"{key}: {value_str}")
-    return "\n".join(lines)
+            lines[i] = new_line
+            return bom + "\n".join(lines)
+    lines.insert(close, new_line)
+    return bom + "\n".join(lines)
 
 
 def _append_log(raw, line):
@@ -1122,10 +1250,30 @@ def _sql_select(stmt, args):
     if not m:
         sys.exit("sql: SELECT <cols> FROM <table> [WHERE ...] [ORDER BY col [DESC]] [LIMIT n]")
     cols_s, table, rest = m.group(1), m.group(2), m.group(3)
-    wm = re.search(r"\bWHERE\s+(.+?)(?=\bORDER\s+BY\b|\bLIMIT\b|$)", rest, re.I | re.S)
-    om = re.search(r"\bORDER\s+BY\s+(\w+)(\s+DESC)?", rest, re.I)
-    lm = re.search(r"\bLIMIT\s+(\d+)", rest, re.I)
-    conds = _parse_where(wm.group(1).strip() if wm else None)
+    # carve WHERE / ORDER BY / LIMIT only where the keywords sit OUTSIDE quotes, so a value
+    # like 'Limit of embeddings' or '... order by date' can't truncate the condition
+    found = []
+    for name, rx in (("where", _RE_KW_WHERE), ("order", _RE_KW_ORDER), ("limit", _RE_KW_LIMIT)):
+        km = _find_outside_quotes(rest, rx)
+        if km:
+            found.append((km.start(), name, km))
+    found.sort(key=lambda x: x[0])
+    if found and rest[:found[0][0]].strip():
+        sys.exit(f"sql: unexpected text after table: {rest[:found[0][0]].strip()!r}")
+    if not found and rest.strip():
+        sys.exit(f"sql: unexpected text after table: {rest.strip()!r}")
+    part = {}
+    for idx, (_, name, km) in enumerate(found):
+        end = found[idx + 1][0] if idx + 1 < len(found) else len(rest)
+        part[name] = rest[km.end():end].strip()
+    om = re.fullmatch(r"([\w-]+)(?:\s+(DESC|ASC))?", part.get("order", ""), re.I) \
+        if "order" in part else None
+    if "order" in part and not om:
+        sys.exit(f"sql: bad ORDER BY: {part['order']!r}")
+    lm = re.fullmatch(r"(\d+)", part.get("limit", "")) if "limit" in part else None
+    if "limit" in part and not lm:
+        sys.exit(f"sql: bad LIMIT: {part['limit']!r}")
+    conds = _parse_where(part.get("where"))
     cols = (["path", "title", "status", "tags"] if cols_s.strip() == "*"
             else [c.strip() for c in _split_inline_list(cols_s)])
     graph = _link_graph()
@@ -1142,7 +1290,7 @@ def _sql_select(stmt, args):
             if numeric:
                 return float(v) if str(v).replace(".", "", 1).isdigit() else 0.0
             return str(v)
-        out.sort(key=_ordk, reverse=bool(om.group(2)))
+        out.sort(key=_ordk, reverse=(om.group(2) or "").upper() == "DESC")
     if lm:
         out = out[: int(lm.group(1))]
     print(" | ".join(cols))
@@ -1326,7 +1474,8 @@ EMB_APP = ('{\n  "useMarkdownLinks": false,\n  "newLinkFormat": "shortest",\n'
            '  "alwaysUpdateLinks": true\n}\n')
 EMB_GITIGNORE = (".obsidian/workspace.json\n.obsidian/workspace-mobile.json\n.obsidian/cache\n"
                  ".obsidian/plugins/\n.obsidian/appearance.json\n.obsidian/hotkeys.json\n"
-                 ".trash/\n.DS_Store\n__pycache__/\n*.pyc\nbuild/\ndist/\n*.spec\naudock_cli.py\n")
+                 ".smart-env/\n.trash/\n.DS_Store\n__pycache__/\n*.pyc\n"
+                 "build/\ndist/\n*.spec\naudock_cli.py\n")
 EMB_INDEX = '''---
 id: index
 title: Audock — Index
@@ -1484,16 +1633,18 @@ def cmd_init(args):
         try:
             g = json.loads(read(gp))
         except Exception:  # noqa: BLE001
-            g = {}
-        groups = g.get("colorGroups") or []
-        have = {grp.get("query") for grp in groups}
-        added = [grp for grp in GRAPH_GROUPS if grp["query"] not in have]
-        if added and not dry:
-            groups.extend(added)
-            g["colorGroups"] = groups
-            gp.write_text(json.dumps(g, indent=2), encoding="utf-8")
-        (created if added else skipped).append(
-            f".obsidian/graph.json (+{len(added)} color groups, existing kept)")
+            g = None
+        if not isinstance(g, dict):  # unreadable: never overwrite the user's graph settings
+            skipped.append(".obsidian/graph.json (unreadable — left untouched)")
+        else:
+            groups = [x for x in (g.get("colorGroups") or []) if isinstance(x, dict)]
+            have = {grp.get("query") for grp in groups}
+            added = [grp for grp in GRAPH_GROUPS if grp["query"] not in have]
+            if added and not dry:
+                g["colorGroups"] = groups + added
+                gp.write_text(json.dumps(g, indent=2), encoding="utf-8")
+            (created if added else skipped).append(
+                f".obsidian/graph.json (+{len(added)} color groups, existing kept)")
     else:
         if not dry:
             (target / ".obsidian").mkdir(parents=True, exist_ok=True)
@@ -1509,12 +1660,16 @@ def cmd_init(args):
         try:
             lst = json.loads(read(cp))
         except Exception:  # noqa: BLE001
-            lst = []
-        added_p = [x for x in want_plugins if x not in lst]
-        if added_p and not dry:
-            cp.write_text(json.dumps(lst + added_p), encoding="utf-8")
-        (created if added_p else skipped).append(
-            f".obsidian/community-plugins.json (+{len(added_p)}, existing kept)")
+            lst = None
+        if not isinstance(lst, list):  # unreadable or unexpected shape: never overwrite it
+            skipped.append(".obsidian/community-plugins.json (unreadable — left untouched; "
+                           "add dataview/omnisearch/smart-connections by hand)")
+        else:
+            added_p = [x for x in want_plugins if x not in lst]
+            if added_p and not dry:
+                cp.write_text(json.dumps(lst + added_p), encoding="utf-8")
+            (created if added_p else skipped).append(
+                f".obsidian/community-plugins.json (+{len(added_p)}, existing kept)")
     else:
         if not dry:
             cp.write_text(json.dumps(want_plugins), encoding="utf-8")

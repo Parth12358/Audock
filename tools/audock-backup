@@ -10,15 +10,18 @@
 #   backup-root defaults to  ~/.audock-backups
 #   keep-days   defaults to  30  (dated bundles older than this are deleted)
 #
-# Cron (daily at 02:30):
-#   30 2 * * *  /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
+# Cron (daily at 02:30). The mkdir must come first: the shell opens the log before the
+# script runs, so on a fresh machine a missing ~/.audock-backups would stop every run.
+#   30 2 * * *  mkdir -p ~/.audock-backups && /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
 set -euo pipefail
 
 VAULT="${1:?usage: audock-backup <vault-dir> [backup-root] [keep-days]}"
 BACKUP_ROOT="${2:-$HOME/.audock-backups}"
 KEEP_DAYS="${3:-30}"
 VAULT="$(cd "$VAULT" && pwd)"
-NAME="$(basename "$VAULT")"
+# basename + a short hash of the full path, so two vaults both called "Vault" never share
+# (and overwrite) one replica
+NAME="$(basename "$VAULT")-$(printf '%s' "$VAULT" | git hash-object --stdin | cut -c1-8)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REPLICA="$BACKUP_ROOT/$NAME.git"      # bare mirror (the RAID copy)
 BUNDLES="$BACKUP_ROOT/$NAME-bundles"  # dated snapshots
@@ -33,32 +36,52 @@ if [ ! -d "$VAULT/.git" ]; then
   git -C "$VAULT" init -q
 fi
 
-# 1. commit pending changes (no-op if clean)
+FAILED=0
+
+# 1. commit pending changes (no-op if clean). A failed commit (gpg signing with no agent,
+#    a pre-commit hook, an index.lock from Obsidian Git) must not stop the backup: we log it
+#    and still mirror + bundle everything that IS committed.
 if [ -n "$(git -C "$VAULT" status --porcelain)" ]; then
-  git -C "$VAULT" add -A
-  git -C "$VAULT" -c user.name="audock-backup" -c user.email="audock@localhost" \
-      commit -q -m "backup: snapshot $STAMP"
-  log "committed pending changes"
+  if git -C "$VAULT" add -A && \
+     git -C "$VAULT" -c user.name="audock-backup" -c user.email="audock@localhost" \
+         -c commit.gpgsign=false commit --no-verify -q -m "backup: snapshot $STAMP"; then
+    log "committed pending changes"
+  else
+    log "WARNING: commit failed — backing up already-committed history only"
+    FAILED=1
+  fi
 else
   log "working tree clean — nothing to commit"
+fi
+
+if ! git -C "$VAULT" rev-parse -q --verify HEAD >/dev/null; then
+  log "ERROR: vault has no commits yet — nothing to back up"
+  exit 1
 fi
 
 # 2. mirror to the bare replica (create on first run, then keep in sync)
 if [ ! -d "$REPLICA" ]; then
   log "creating replica mirror at $REPLICA"
-  git clone --mirror -q "$VAULT" "$REPLICA"
+  git clone --mirror -q "$VAULT" "$REPLICA" || { log "ERROR: replica clone failed"; FAILED=1; }
 else
-  git -C "$VAULT" push --mirror -q "$REPLICA"
-  log "synced replica mirror"
+  if git -C "$VAULT" push --mirror -q "$REPLICA"; then
+    log "synced replica mirror"
+  else
+    log "ERROR: replica sync failed"; FAILED=1
+  fi
 fi
 
 # 3. dated point-in-time bundle + prune old ones
 BUNDLE="$BUNDLES/$NAME-$STAMP.bundle"
-git -C "$VAULT" bundle create -q "$BUNDLE" --all
-log "wrote bundle $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
+if git -C "$VAULT" bundle create -q "$BUNDLE" --all; then
+  log "wrote bundle $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
+else
+  log "ERROR: bundle failed"; FAILED=1
+fi
 find "$BUNDLES" -name "*.bundle" -type f -mtime "+$KEEP_DAYS" -print -delete \
   | sed 's/^/  pruned /' || true
 
 log "done. replica: $REPLICA  bundles: $BUNDLES"
+[ "$FAILED" -eq 0 ] || { log "finished WITH ERRORS (see above)"; exit 1; }
 # Restore from replica:  git clone <replica>.git <dir>
 # Restore from bundle:   git clone <file.bundle> <dir>

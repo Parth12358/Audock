@@ -12,8 +12,12 @@ permissions:
   contents: write  # needed to create the Release and upload assets
 
 jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
     name: build (${{ matrix.os }})
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

@@ -104,7 +104,7 @@ a release with `git tag v0.1.0 && git push origin v0.1.0`.
 repo to a bare replica, and writes a dated git bundle (pruning old ones). Run it daily via cron:
 
 ```sh
-30 2 * * *  /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
+30 2 * * *  mkdir -p ~/.audock-backups && /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
 ```
 
 Restore any time: `git clone ~/.audock-backups/<vault>.git <dir>` (replica) or

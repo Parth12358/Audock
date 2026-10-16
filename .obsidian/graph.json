@@ -8,6 +8,13 @@
   "collapse-color-groups": false,
   "colorGroups": [
     {
+      "query": "tag:#machine-learning",
+      "color": {
+        "a": 1,
+        "rgb": 14703242
+      }
+    },
+    {
       "query": "tag:#agentic-memory",
       "color": {
         "a": 1,
@@ -22,24 +29,31 @@
       }
     },
     {
-      "query": "tag:#information-retrieval",
+      "query": "tag:#domain/ml",
       "color": {
         "a": 1,
         "rgb": 14722136
       }
     },
     {
-      "query": "tag:#knowledge-management",
+      "query": "tag:#information-retrieval",
       "color": {
         "a": 1,
         "rgb": 10906592
       }
     },
     {
-      "query": "tag:#machine-learning",
+      "query": "tag:#knowledge-management",
       "color": {
         "a": 1,
         "rgb": 14703242
+      }
+    },
+    {
+      "query": "path:maps/",
+      "color": {
+        "a": 1,
+        "rgb": 13158600
       }
     },
     {
