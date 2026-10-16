@@ -81,3 +81,4 @@ jobs:
           if (-not ($sel -match "notes/bm25-ranking.md")) { throw "path column is not POSIX-style: $sel" }
           Set-Location $env:RUNNER_TEMP
           & audock query x 2>$null; if ($LASTEXITCODE -eq 0) { throw "should refuse outside a vault" }
+          exit 0   # the refusal above leaves $LASTEXITCODE=1 on purpose; all checks passed
