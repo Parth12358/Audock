@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""~1400 seeded synthetic tests for the Audock CLI: property tests against reference
+"""~1600 seeded synthetic tests for the Audock CLI: property tests against reference
 implementations + end-to-end runs that try to break it. Usage: synth_tests.py <audock-path>"""
 import hashlib, json, os, random, re, shutil, subprocess, sys, types
 from pathlib import Path
@@ -624,6 +624,22 @@ try:
     check("N fixes", M._resolve_vault(None) is None, "frozen binary outside a vault must not pick the cwd")
 finally:
     del M.sys.frozen
+
+# the repo's own note template has an HTML comment right under ## Log: sql log lines must still
+# land after the existing entries (chronological), and self-links don't count toward under-linked
+TV = make_vault("tmpl", n=3)
+shutil.copy(AUDOCK.parent.parent / "templates/note.md", TV / "templates/note.md")
+rc, out, _ = run(["new", "note", "From Repo Template"], cwd=TV)
+pt = TV / "notes/from-repo-template.md"
+run(["sql", "UPDATE notes SET status='stable' WHERE title='From Repo Template'", "--apply"], cwd=TV)
+logl = [l for l in pt.read_text().split("## Log", 1)[1].splitlines() if l.startswith("- ")]
+check("N fixes", len(logl) == 2 and "created" in logl[0] and "sql:" in logl[1], f"template log order: {logl}")
+pt.write_text(pt.read_text().replace("## Log", "self [[from-repo-template]] [[From Repo Template]] [[n000]]\n\n## Log"))
+rc, out, _ = run(["doctor"], cwd=TV)
+check("N fixes", "notes/from-repo-template.md" in out.split("under-linked")[1].split("duplicate")[0],
+      "self-links counted toward under-linked")
+for fam in [("cache", "caches"), ("make", "makes", "making"), ("store", "stores", "storing", "stored")]:
+    check("N fixes", len({M._stem(w) for w in fam}) == 1, f"stem family {fam}")
 
 # outside any vault, every command except init refuses (never scans an arbitrary tree)
 OUT = SB / "not-a-vault"; OUT.mkdir(exist_ok=True); (OUT / "random.md").write_text("---\ntype: note\n---\nzz\n")

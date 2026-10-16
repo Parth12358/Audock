@@ -18,7 +18,8 @@ are created and graph color-groups / the Dataview entry are merged in.
    Nothing is written.
 3. **Apply:** `audock init <path>`. This creates `sources/ notes/ maps/ journal/ templates/`,
    `CLAUDE.md`, `index.md`, `tags.md`, the `audock` skill, and merges `.obsidian/graph.json`
-   color groups + adds `dataview` to community plugins — without touching existing files.
+   color groups + adds `dataview`, `omnisearch` and `smart-connections` to community plugins —
+   without touching existing files (an unreadable config file is left alone).
    (If only the installed `audock` binary is available, `tools/audock` is skipped; that's fine.)
 4. **Version it:** if the folder isn't a git repo yet, `git init && git add -A &&
    git commit -m "add Audock"`. Git is Audock's history/losslessness substrate.

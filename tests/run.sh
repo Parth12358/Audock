@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Audock's test suites against tools/audock.
-#   tests/run.sh            regression (≈100 cases) + synthetic (≈1,400 cases, seed 1234)
+#   tests/run.sh            regression (102 cases) + synthetic (≈1,600 cases, seed 1234)
 #   SEED=7 tests/run.sh     synthetic suite with another seed
 #   PYTHON=/path/to/python  use a python that has PyYAML (adds the YAML-validity group)
 set -euo pipefail

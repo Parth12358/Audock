@@ -8,13 +8,6 @@
   "collapse-color-groups": false,
   "colorGroups": [
     {
-      "query": "tag:#machine-learning",
-      "color": {
-        "a": 1,
-        "rgb": 14703242
-      }
-    },
-    {
       "query": "tag:#agentic-memory",
       "color": {
         "a": 1,

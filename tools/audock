@@ -3,8 +3,8 @@
 
 Zero required dependencies, no external tools — a pure-Python BM25 scan (field-weighted, light
 stemming). The vault root is found via --vault, then $AUDOCK_VAULT, then the nearest ancestor of
-the CWD containing notes/ & sources/, then this script's parent dir — so the in-repo script and a
-released standalone binary both work.
+the CWD containing notes/ & sources/, then (source script only) the vault this script lives in.
+If none is found, every command except `init` stops with an error.
 
 Commands:
   init [path] [--dry-run]                          scaffold Audock into a new/existing vault
@@ -471,6 +471,8 @@ def _stem(w):
         w = w[:-3]
     elif len(w) > 5 and w.endswith("ed"):
         w = w[:-2]
+    if len(w) > 3 and w.endswith("e"):  # cache/caches → cach, make/makes/making → mak
+        w = w[:-1]
     return w
 
 
@@ -622,7 +624,7 @@ def cmd_show(args):
 
 
 def cmd_context(args):
-    """One call → a bounded, deduped, comment-stripped answer pack for a question.
+    """One call → a bounded, comment-stripped answer pack for a question (each note once).
     This is the cheapest way to answer: no frontmatter noise, no whole-file reads,
     size-capped, with explicit note of anything omitted (never a silent cap)."""
     sup = getattr(args, "all", False)
@@ -1014,7 +1016,8 @@ def cmd_doctor(args):
                 if t.strip().lower() not in source_names:
                     missing_src.append(f"{rel} -> {t}")
         # under-linked: fewer than 2 outgoing wikilinks (weakly wired into the graph)
-        if len(_links(body)) < 2:
+        own = _keys_of(p, fm)
+        if len({t.strip().lower() for t in _links(body)} - own) < 2:  # self-links don't count
             underlinked.append(rel)
 
     # tag hygiene: tags that normalize to the same key (case/plural/_-/ variants) → merge
@@ -1303,7 +1306,8 @@ def _append_log(raw, line):
     for i, ln in enumerate(lines):
         if ln.strip().lower() == "## log":
             last, k = i, i + 1
-            while k < len(lines) and not lines[k].lstrip().startswith(("#", "<!--")):
+            while k < len(lines) and not lines[k].lstrip().startswith(
+                    ("#", "<!-- AUDOCK:", "<!-- audock:")):
                 if lines[k].strip().startswith("- "):
                     last = k
                 k += 1
