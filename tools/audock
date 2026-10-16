@@ -1,0 +1,531 @@
+#!/usr/bin/env python3
+"""audock — the Audock vault librarian CLI.
+
+Zero required dependencies. Uses ripgrep for fast search if present, else falls back to a
+pure-Python scan. Run from anywhere; the vault root is inferred from this script's location.
+
+Commands:
+  new note|source|moc "Title"                      scaffold a file from a template
+  ingest <file|url|-> --type KIND [--title ..] [--ref ..]   capture raw material into sources/
+  query "text" [--tag T] [--type T] [--since DATE] [--json]  search frontmatter + body
+  reindex                                          rebuild tags.md + index.md maps list
+  doctor                                           report orphans / broken links / dups / stale
+"""
+import argparse
+import hashlib
+import re
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime, timezone, date, timedelta
+from pathlib import Path
+
+VAULT = Path(__file__).resolve().parent.parent
+TEMPLATES = VAULT / "templates"
+SKIP_DIRS = {".git", ".obsidian", "templates", ".trash", "__pycache__", "inbox"}
+KIND_TO_DIR = {
+    "conversation": "conversations",
+    "code": "code",
+    "web": "web",
+    "manual": "manual",
+}
+STALE_DAYS = 180
+
+
+# ---------- small utilities ----------
+
+def slugify(text):
+    text = text.strip().lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text or "untitled"
+
+
+def today():
+    return date.today().isoformat()
+
+
+def utc_stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
+def utc_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def md_files(root=None):
+    root = root or VAULT
+    for p in sorted(root.rglob("*.md")):
+        if any(part in SKIP_DIRS for part in p.relative_to(VAULT).parts):
+            continue
+        yield p
+
+
+def read(p):
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+# ---------- minimal frontmatter parser (no PyYAML needed) ----------
+
+def _strip_q(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+
+def _split_inline_list(inner):
+    out, buf, depth, q = [], "", 0, None
+    for ch in inner:
+        if q:
+            buf += ch
+            if ch == q:
+                q = None
+        elif ch in "\"'":
+            q = ch
+            buf += ch
+        elif ch in "[":
+            depth += 1
+            buf += ch
+        elif ch in "]":
+            depth -= 1
+            buf += ch
+        elif ch == "," and depth == 0:
+            out.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    if buf.strip():
+        out.append(buf)
+    return [_strip_q(x) for x in out]
+
+
+def parse_frontmatter(text):
+    """Return (dict, body). Tolerant of scalars, inline [lists], and block - lists."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return {}, text
+    fm_lines = lines[1:end]
+    body = "\n".join(lines[end + 1:])
+    data = {}
+    i, n = 0, len(fm_lines)
+    while i < n:
+        line = fm_lines[i]
+        if not line.strip() or line.strip().startswith("#"):
+            i += 1
+            continue
+        m = re.match(r"^([A-Za-z0-9_\-]+):\s*(.*)$", line)
+        if not m:
+            i += 1
+            continue
+        key, val = m.group(1).strip(), m.group(2).strip()
+        if val == "":
+            items, j = [], i + 1
+            while j < n and re.match(r"^\s*-\s+", fm_lines[j]):
+                items.append(_strip_q(re.sub(r"^\s*-\s+", "", fm_lines[j]).strip()))
+                j += 1
+            if items:
+                data[key] = items
+                i = j
+                continue
+            data[key] = ""
+            i += 1
+            continue
+        if val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            data[key] = _split_inline_list(inner) if inner else []
+        else:
+            data[key] = _strip_q(val)
+        i += 1
+    return data, body
+
+
+def as_list(v):
+    if v is None or v == "":
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+# ---------- template instantiation ----------
+
+def fill_template(name, mapping):
+    tpl = read(TEMPLATES / f"{name}.md")
+    for k, v in mapping.items():
+        tpl = tpl.replace(k, v)
+    return tpl
+
+
+def write_new(path, content, force=False):
+    if path.exists() and not force:
+        sys.exit(f"error: {path.relative_to(VAULT)} already exists (use a different title)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+# ---------- commands ----------
+
+def cmd_new(args):
+    title = args.title
+    slug = slugify(title)
+    d = today()
+    if args.kind == "note":
+        content = fill_template("note", {
+            "__ID__": f"{d.replace('-', '')}-{slug}",
+            "__TITLE__": title,
+            "__DATE__": d,
+        })
+        path = write_new(VAULT / "notes" / f"{slug}.md", content, args.force)
+    elif args.kind == "moc":
+        content = fill_template("moc", {
+            "__ID__": f"{d.replace('-', '')}-{slug}",
+            "__TITLE__": title,
+            "__DATE__": d,
+            "__SLUG__": slug,
+        })
+        path = write_new(VAULT / "maps" / f"{slug}.md", content, args.force)
+    elif args.kind == "source":
+        ts = utc_stamp()
+        content = fill_template("source", {
+            "__ID__": f"{ts}-{slug}",
+            "__TITLE__": title,
+            "__ORIGIN__": "manual",
+            "__ORIGIN_REF__": "manual",
+            "__TS__": utc_iso(),
+            "__HASH__": "sha256:(none)",
+            "__BODY__": "",
+        })
+        path = write_new(VAULT / "sources" / "manual" / f"{ts}-{slug}.md", content, args.force)
+    print(f"created {path.relative_to(VAULT)}")
+
+
+def _load_body(src, kind):
+    """Return (body_text, origin_ref) for ingest input."""
+    if src == "-":
+        return sys.stdin.read(), "stdin"
+    if re.match(r"^https?://", src):
+        try:
+            req = urllib.request.Request(src, headers={"User-Agent": "audock/1.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+            return raw, src
+        except Exception as e:  # noqa: BLE001 — capture reference even if fetch fails
+            return f"(could not fetch {src}: {e})", src
+    p = Path(src)
+    if p.exists():
+        return p.read_text(encoding="utf-8", errors="replace"), str(p)
+    sys.exit(f"error: no such file/url: {src}")
+
+
+def cmd_ingest(args):
+    kind = args.type
+    if kind not in KIND_TO_DIR:
+        sys.exit(f"error: --type must be one of {', '.join(KIND_TO_DIR)}")
+    body, ref = _load_body(args.source, kind)
+    ref = args.ref or ref
+    title = args.title or (Path(ref).name if ref not in ("stdin",) else f"{kind} capture")
+    slug = slugify(title)
+    ts = utc_stamp()
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    source_id = f"{ts}-{slug}"
+
+    # dedup by hash across existing sources
+    for existing in (VAULT / "sources").rglob("*.md"):
+        fm, _ = parse_frontmatter(read(existing))
+        if str(fm.get("hash", "")).endswith(digest):
+            print(f"duplicate: identical content already captured at "
+                  f"{existing.relative_to(VAULT)} ([[{fm.get('id')}]])")
+            print("skipping re-capture. Distill from the existing source.")
+            return
+
+    content = fill_template("source", {
+        "__ID__": source_id,
+        "__TITLE__": title,
+        "__ORIGIN__": kind,
+        "__ORIGIN_REF__": ref,
+        "__TS__": utc_iso(),
+        "__HASH__": f"sha256:{digest}",
+        "__BODY__": body.replace("```", "``​`"),  # defuse fence collisions
+    })
+    out = write_new(VAULT / "sources" / KIND_TO_DIR[kind] / f"{source_id}.md", content, args.force)
+    print(f"captured {out.relative_to(VAULT)}")
+    print(f"source id: {source_id}")
+    print("next: distill with  tools/audock new note \"<Concept>\"  and set "
+          f"sources: [\"[[{source_id}]]\"]")
+
+
+def _score(term, fm, body, path):
+    if not term:
+        return 1, ""
+    t = term.lower()
+    title = str(fm.get("title", "")).lower()
+    aliases = " ".join(as_list(fm.get("aliases"))).lower()
+    tags = " ".join(as_list(fm.get("tags"))).lower()
+    body_l = body.lower()
+    score = 0
+    if t in title:
+        score += 10
+    if t in aliases:
+        score += 6
+    if t in tags:
+        score += 4
+    score += body_l.count(t)
+    if score == 0 and t in path.name.lower():
+        score += 2
+    # snippet: first body line containing the term, else first non-empty line
+    snippet = ""
+    for line in body.split("\n"):
+        if t in line.lower() and line.strip() and not line.strip().startswith("---"):
+            snippet = line.strip()
+            break
+    if not snippet:
+        for line in body.split("\n"):
+            if line.strip() and not line.strip().startswith(("#", "<!--")):
+                snippet = line.strip()
+                break
+    return score, snippet[:160]
+
+
+def _rg_candidates(term):
+    if not term:
+        return None
+    try:
+        out = subprocess.run(
+            ["rg", "-l", "-i", "--glob", "*.md", "--", term, str(VAULT)],
+            capture_output=True, text=True,
+        )
+        if out.returncode in (0, 1):
+            files = [Path(p) for p in out.stdout.splitlines() if p]
+            return [p for p in files if not any(part in SKIP_DIRS
+                    for part in p.relative_to(VAULT).parts)]
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def cmd_query(args):
+    term = args.text or ""
+    candidates = _rg_candidates(term)
+    files = candidates if candidates is not None else list(md_files())
+    results = []
+    for p in files:
+        fm, body = parse_frontmatter(read(p))
+        if args.type and str(fm.get("type", "")) != args.type:
+            continue
+        if args.tag and args.tag not in as_list(fm.get("tags")):
+            continue
+        if args.since:
+            stamp = str(fm.get("updated") or fm.get("created") or "")[:10]
+            if stamp and stamp < args.since:
+                continue
+        score, snippet = _score(term, fm, body, p)
+        if score <= 0:
+            continue
+        results.append({
+            "path": str(p.relative_to(VAULT)),
+            "id": fm.get("id", ""),
+            "title": fm.get("title", ""),
+            "type": fm.get("type", ""),
+            "tags": as_list(fm.get("tags")),
+            "score": score,
+            "snippet": snippet,
+        })
+    results.sort(key=lambda r: (-r["score"], r["path"]))
+    if args.json:
+        import json
+        print(json.dumps(results, indent=2))
+        return
+    if not results:
+        print("no matches")
+        return
+    for r in results[: args.limit]:
+        print(f"[{r['score']:>3}] {r['title']}  ({r['path']})")
+        if r["tags"]:
+            print(f"      tags: {', '.join(r['tags'])}")
+        if r["snippet"]:
+            print(f"      {r['snippet']}")
+    if len(results) > args.limit:
+        print(f"... {len(results) - args.limit} more (use --limit)")
+
+
+def _replace_block(text, begin, end, new_inner):
+    pat = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.DOTALL)
+    repl = f"{begin}\n{new_inner}\n{end}"
+    if pat.search(text):
+        return pat.sub(lambda _: repl, text)
+    return text  # markers missing; leave untouched
+
+
+def cmd_reindex(args):
+    # 1) tags.md static block
+    tag_map = {}
+    for p in md_files(VAULT / "notes"):
+        fm, _ = parse_frontmatter(read(p))
+        for tag in as_list(fm.get("tags")):
+            tag_map.setdefault(tag, []).append(fm.get("id") or p.stem)
+    lines = []
+    for tag in sorted(tag_map):
+        ids = sorted(tag_map[tag])
+        links = " ".join(f"[[{i}]]" for i in ids)
+        lines.append(f"- `#{tag}` ({len(ids)}): {links}")
+    inner = "\n".join(lines) if lines else "- (no tags yet)"
+    tags_path = VAULT / "tags.md"
+    tags_path.write_text(
+        _replace_block(read(tags_path), "<!-- AUDOCK:TAGS:BEGIN -->",
+                       "<!-- AUDOCK:TAGS:END -->", inner),
+        encoding="utf-8",
+    )
+
+    # 2) index.md maps list
+    maps = []
+    for p in md_files(VAULT / "maps"):
+        fm, _ = parse_frontmatter(read(p))
+        maps.append((fm.get("title") or p.stem, fm.get("id") or p.stem))
+    maps_inner = ("\n".join(f"- [[{mid}|{title}]]" for title, mid in sorted(maps))
+                  if maps else "- (none yet)")
+    index_path = VAULT / "index.md"
+    index_path.write_text(
+        _replace_block(read(index_path), "<!-- AUDOCK:MAPS:BEGIN -->",
+                       "<!-- AUDOCK:MAPS:END -->", maps_inner),
+        encoding="utf-8",
+    )
+    print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps")
+
+
+LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_INLINE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_noise(body):
+    """Drop code fences, HTML comments, and inline code so only real prose links remain.
+    Illustrative links in examples/templates/docs live in exactly those regions."""
+    body = _FENCE_RE.sub("", body)
+    body = _COMMENT_RE.sub("", body)
+    body = _INLINE_RE.sub("", body)
+    return body
+
+
+def _links(body):
+    return LINK_RE.findall(_strip_noise(body))
+
+
+def _resolvable_names():
+    """Set of lowercased names that a [[link]] may legitimately target."""
+    names = set()
+    for p in md_files():
+        fm, _ = parse_frontmatter(read(p))
+        for v in (fm.get("id"), fm.get("title"), p.stem):
+            if v:
+                names.add(str(v).lower())
+        for a in as_list(fm.get("aliases")):
+            names.add(a.lower())
+    return names
+
+
+# Auto-generated indexes list every note; links from them are not semantic backlinks.
+GENERATED = {"tags.md", "index.md"}
+
+
+def cmd_doctor(args):
+    names = _resolvable_names()
+    notes, incoming, broken = [], {}, []
+    for p in md_files():
+        fm, body = parse_frontmatter(read(p))
+        rel = str(p.relative_to(VAULT))
+        if fm.get("type") == "note":
+            notes.append((p, fm))
+        if rel in GENERATED:
+            continue
+        for target in _links(body):
+            tgt = target.strip()
+            if tgt.lower() not in names:
+                broken.append((rel, tgt))
+            else:
+                incoming[tgt.lower()] = incoming.get(tgt.lower(), 0) + 1
+
+    # orphans: type==note with no incoming link by id/title/filename
+    orphans = []
+    for p, fm in notes:
+        keys = {str(fm.get("id", "")).lower(), str(fm.get("title", "")).lower(), p.stem.lower()}
+        keys |= {a.lower() for a in as_list(fm.get("aliases"))}
+        if not (keys & set(incoming)):
+            orphans.append(str(p.relative_to(VAULT)))
+
+    # duplicate candidates: same slugified title
+    by_slug = {}
+    for p, fm in notes:
+        by_slug.setdefault(slugify(str(fm.get("title", p.stem))), []).append(
+            str(p.relative_to(VAULT)))
+    dups = {k: v for k, v in by_slug.items() if len(v) > 1}
+
+    # stale: updated older than STALE_DAYS
+    cutoff = (date.today() - timedelta(days=STALE_DAYS)).isoformat()
+    stale = []
+    for p, fm in notes:
+        stamp = str(fm.get("updated") or fm.get("created") or "")[:10]
+        if stamp and stamp < cutoff:
+            stale.append((str(p.relative_to(VAULT)), stamp))
+
+    def section(title, items):
+        print(f"\n{title}: {len(items)}")
+        for it in items:
+            print(f"  - {it}")
+
+    print(f"audock doctor — {len(notes)} notes")
+    section("broken links", [f"{src} -> [[{tgt}]]" for src, tgt in broken])
+    section("orphan notes (no backlinks)", orphans)
+    section("duplicate-title candidates", [f"{k}: {', '.join(v)}" for k, v in dups.items()])
+    section(f"stale notes (> {STALE_DAYS}d)", [f"{p} ({s})" for p, s in stale])
+    if not (broken or orphans or dups or stale):
+        print("\nall clear ✓")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="audock", description="Audock vault librarian")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_new = sub.add_parser("new", help="scaffold a file from a template")
+    p_new.add_argument("kind", choices=["note", "source", "moc"])
+    p_new.add_argument("title")
+    p_new.add_argument("--force", action="store_true")
+    p_new.set_defaults(func=cmd_new)
+
+    p_ing = sub.add_parser("ingest", help="capture raw material into sources/")
+    p_ing.add_argument("source", help="file path, http(s) url, or - for stdin")
+    p_ing.add_argument("--type", required=True, choices=list(KIND_TO_DIR))
+    p_ing.add_argument("--title")
+    p_ing.add_argument("--ref")
+    p_ing.add_argument("--force", action="store_true")
+    p_ing.set_defaults(func=cmd_ingest)
+
+    p_q = sub.add_parser("query", help="search frontmatter + body")
+    p_q.add_argument("text", nargs="?", default="")
+    p_q.add_argument("--tag")
+    p_q.add_argument("--type", choices=["note", "source", "moc", "entity"])
+    p_q.add_argument("--since", help="YYYY-MM-DD; filter by updated/created")
+    p_q.add_argument("--limit", type=int, default=15)
+    p_q.add_argument("--json", action="store_true")
+    p_q.set_defaults(func=cmd_query)
+
+    p_r = sub.add_parser("reindex", help="rebuild tags.md + index.md maps list")
+    p_r.set_defaults(func=cmd_reindex)
+
+    p_d = sub.add_parser("doctor", help="orphans / broken links / dups / stale report")
+    p_d.set_defaults(func=cmd_doctor)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

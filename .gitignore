@@ -1,0 +1,12 @@
+# Obsidian local/session state — not knowledge, don't version
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+.trash/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+__pycache__/
+*.pyc
