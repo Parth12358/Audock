@@ -253,7 +253,7 @@ def cmd_ingest(args):
         "__ORIGIN_REF__": ref,
         "__TS__": utc_iso(),
         "__HASH__": f"sha256:{digest}",
-        "__BODY__": body.replace("```", "``​`"),  # defuse fence collisions
+        "__BODY__": body,  # stored verbatim — the body below the frontmatter is the ground truth
     })
     out = write_new(VAULT / "sources" / KIND_TO_DIR[kind] / f"{source_id}.md", content, args.force)
     print(f"captured {out.relative_to(VAULT)}")
@@ -262,46 +262,75 @@ def cmd_ingest(args):
           f"sources: [\"[[{source_id}]]\"]")
 
 
+# Tiny stopword list so natural-language questions tokenize to meaningful terms.
+STOPWORDS = {
+    "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "is", "are", "be", "do",
+    "does", "how", "what", "why", "when", "which", "who", "that", "this", "with", "as", "by",
+    "it", "its", "from", "at", "we", "i", "you", "can", "should", "would", "about", "into",
+    "was", "were", "has", "have", "had", "will", "me", "my",
+}
+
+
+def _tokens(term):
+    """Split a query/question into meaningful search tokens (keeps `domain/ml` style tags)."""
+    out = []
+    for t in re.findall(r"[a-z0-9][a-z0-9/_-]*", term.lower()):
+        t = t.strip("/-_")
+        if len(t) >= 2 and t not in STOPWORDS:
+            out.append(t)
+    return out
+
+
+def _first_line(body):
+    for line in body.split("\n"):
+        ls = line.strip()
+        if ls and not ls.startswith(("#", "<!--", "---", "```")):
+            return ls
+    return ""
+
+
 def _score(term, fm, body, path):
-    if not term:
-        return 1, ""
-    t = term.lower()
+    toks = _tokens(term)
+    if not toks:  # tag/type-only listing: neutral match so filters still return rows
+        return 1, _first_line(body)[:160]
     title = str(fm.get("title", "")).lower()
     aliases = " ".join(as_list(fm.get("aliases"))).lower()
     tags = " ".join(as_list(fm.get("tags"))).lower()
     body_l = body.lower()
+    name = path.name.lower()
     score = 0
-    if t in title:
-        score += 10
-    if t in aliases:
-        score += 6
-    if t in tags:
-        score += 4
-    score += body_l.count(t)
-    if score == 0 and t in path.name.lower():
-        score += 2
-    # snippet: first body line containing the term, else first non-empty line
+    for t in toks:
+        if t in title:
+            score += 10
+        if t in aliases:
+            score += 6
+        if t in tags:
+            score += 4
+        score += body_l.count(t)
+        if t in name:
+            score += 2
+    phrase = term.strip().lower()
+    if len(phrase) >= 4 and phrase in body_l:  # exact-phrase bonus keeps precision
+        score += 5
     snippet = ""
     for line in body.split("\n"):
-        if t in line.lower() and line.strip() and not line.strip().startswith("---"):
-            snippet = line.strip()
+        ls = line.strip()
+        if ls and not ls.startswith(("---", "<!--")) and any(t in ls.lower() for t in toks):
+            snippet = ls
             break
-    if not snippet:
-        for line in body.split("\n"):
-            if line.strip() and not line.strip().startswith(("#", "<!--")):
-                snippet = line.strip()
-                break
-    return score, snippet[:160]
+    return score, (snippet or _first_line(body))[:160]
 
 
 def _rg_candidates(term):
-    if not term:
+    toks = _tokens(term)
+    if not toks:
         return None
+    cmd = ["rg", "-l", "-i", "--glob", "*.md"]
+    for t in toks:  # multiple -e => OR semantics (recall across all tokens)
+        cmd += ["-e", re.escape(t)]
+    cmd.append(str(VAULT))
     try:
-        out = subprocess.run(
-            ["rg", "-l", "-i", "--glob", "*.md", "--", term, str(VAULT)],
-            capture_output=True, text=True,
-        )
+        out = subprocess.run(cmd, capture_output=True, text=True)
         if out.returncode in (0, 1):
             files = [Path(p) for p in out.stdout.splitlines() if p]
             return [p for p in files if not any(part in SKIP_DIRS
@@ -311,20 +340,23 @@ def _rg_candidates(term):
     return None
 
 
-def cmd_query(args):
-    term = args.text or ""
+def _search(term, tag=None, type_=None, since=None):
+    """Rank vault files against `term` with optional filters. Returns list of dicts."""
     candidates = _rg_candidates(term)
     files = candidates if candidates is not None else list(md_files())
     results = []
     for p in files:
         fm, body = parse_frontmatter(read(p))
-        if args.type and str(fm.get("type", "")) != args.type:
+        if not fm.get("type"):  # skip operational docs (CLAUDE.md, README.md); not knowledge
             continue
-        if args.tag and args.tag not in as_list(fm.get("tags")):
+        if type_ and str(fm.get("type", "")) != type_:
             continue
-        if args.since:
-            stamp = str(fm.get("updated") or fm.get("created") or "")[:10]
-            if stamp and stamp < args.since:
+        if tag and tag not in as_list(fm.get("tags")):
+            continue
+        if since:
+            stamp = str(fm.get("updated") or fm.get("created")
+                        or fm.get("captured") or "")[:10]
+            if stamp and stamp < since:
                 continue
         score, snippet = _score(term, fm, body, p)
         if score <= 0:
@@ -339,6 +371,89 @@ def cmd_query(args):
             "snippet": snippet,
         })
     results.sort(key=lambda r: (-r["score"], r["path"]))
+    return results
+
+
+def _resolve(ident):
+    """Resolve an id / title / alias / filename-stem to (path, fm, body) or None."""
+    t = ident.strip().lower()
+    for p in md_files():
+        fm, body = parse_frontmatter(read(p))
+        keys = {str(fm.get("id", "")).lower(), str(fm.get("title", "")).lower(), p.stem.lower()}
+        keys |= {a.lower() for a in as_list(fm.get("aliases"))}
+        if t in keys:
+            return p, fm, body
+    return None
+
+
+def _compact_body(body):
+    """Comment-stripped, trimmed body — the minimum tokens needed to convey the note."""
+    return _COMMENT_RE.sub("", body).strip()
+
+
+def cmd_show(args):
+    """Print a single note/source cheaply: minimal frontmatter + comment-stripped body.
+    --raw gives the exact file (use for lossless drill-down into a source capture)."""
+    hit = _resolve(args.id)
+    if not hit:
+        sys.exit(f"not found: {args.id}")
+    p, fm, body = hit
+    if args.raw:
+        sys.stdout.write(read(p))
+        return
+    clean = _compact_body(body)
+    if args.body:
+        print(clean)
+        return
+    for k in ("id", "title", "type", "tags", "sources", "status", "updated"):
+        v = fm.get(k)
+        if v:
+            print(f"{k}: {', '.join(v) if isinstance(v, list) else v}")
+    print()
+    print(clean)
+
+
+def cmd_context(args):
+    """One call → a bounded, deduped, comment-stripped answer pack for a question.
+    This is the cheapest way to answer: no frontmatter noise, no whole-file reads,
+    size-capped, with explicit note of anything omitted (never a silent cap)."""
+    results = _search(args.question, tag=args.tag, type_="note", since=args.since)
+    from_sources = False
+    if not results:
+        # Fall back to raw sources: the vault may hold the answer undistilled. Returning
+        # "nothing" when a source matches would be a correctness (recall) failure.
+        results = _search(args.question, tag=args.tag, type_="source", since=args.since)
+        from_sources = True
+    if not results:
+        print("no matches — the vault has nothing on this. Consider INGEST.")
+        return
+    if from_sources:
+        print("[no distilled note yet — showing raw source(s); consider distilling]\n")
+    blocks, used, shown = [], 0, 0
+    for r in results[: args.k]:
+        fm, body = parse_frontmatter(read(VAULT / r["path"]))
+        clean = _compact_body(body)
+        prov = as_list(fm.get("sources"))
+        tag = "  (raw source)" if from_sources else ""
+        header = f"### {fm.get('title', r['id'])}  [[{fm.get('id', '')}]]{tag}"
+        if prov:
+            header += f"\nsources: {', '.join(prov)}"
+        block = f"{header}\n{clean}\n"
+        if shown > 0 and used + len(block) > args.max_bytes:
+            break
+        blocks.append(block)
+        used += len(block)
+        shown += 1
+    print("\n".join(blocks))
+    omitted = len(results) - shown
+    if omitted > 0:
+        print(f"\n[{omitted} more match(es) not shown (size/-k cap). "
+              f"Full list: audock query \"{args.question}\"]")
+    print("[For verbatim quotes/numbers/code, drill to a source: audock show <source-id> --raw]")
+
+
+def cmd_query(args):
+    results = _search(args.text or "", tag=args.tag, type_=args.type, since=args.since)
     if args.json:
         import json
         print(json.dumps(results, indent=2))
@@ -516,6 +631,21 @@ def main():
     p_q.add_argument("--limit", type=int, default=15)
     p_q.add_argument("--json", action="store_true")
     p_q.set_defaults(func=cmd_query)
+
+    p_s = sub.add_parser("show", help="print one note/source (compact, or --raw for verbatim)")
+    p_s.add_argument("id", help="id / title / alias / filename stem")
+    p_s.add_argument("--body", action="store_true", help="only the distilled body")
+    p_s.add_argument("--raw", action="store_true", help="exact file bytes (lossless)")
+    p_s.set_defaults(func=cmd_show)
+
+    p_c = sub.add_parser("context", help="bounded answer pack for a question (cheapest query)")
+    p_c.add_argument("question")
+    p_c.add_argument("--tag")
+    p_c.add_argument("--since", help="YYYY-MM-DD")
+    p_c.add_argument("--k", type=int, default=5, help="max notes to include")
+    p_c.add_argument("--max-bytes", type=int, default=6000, dest="max_bytes",
+                     help="size cap for the pack")
+    p_c.set_defaults(func=cmd_context)
 
     p_r = sub.add_parser("reindex", help="rebuild tags.md + index.md maps list")
     p_r.set_defaults(func=cmd_reindex)

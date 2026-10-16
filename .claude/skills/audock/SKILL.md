@@ -1,6 +1,6 @@
 ---
 name: audock
-description: Maintain and query the Audock documentation knowledge base (an Obsidian-compatible Markdown vault). Use when the user wants to add/capture/remember something into Audock, look something up in it, or tidy it — e.g. "add this to audock", "save this to my notes", "what does audock say about X", "query the vault", "reindex", "run doctor on the vault".
+description: Read from and write to the Audock knowledge base (an Obsidian-compatible Markdown vault). Invoke this PROACTIVELY, without being asked — the CLI is cheap (tiny output). Run `audock context "<question>"` before answering any factual/technical question the vault might cover, and offer to ingest anything worth keeping (decisions, findings, snippets, links). Also use on explicit cues: "add this to audock", "save this", "remember this", "what does audock/my notes say about X", "query the vault", "reindex", "run doctor".
 ---
 
 # Audock librarian
@@ -30,11 +30,15 @@ the quick operator's cheat-sheet.
    ensure the MOC is reachable from `index.md`.
 5. `tools/audock reindex` → `git add -A && git commit -m "ingest(<kind>): <title>"`.
 
-## Look up / query  → QUERY
-1. Read `index.md`, then the relevant `maps/<domain>` MOC.
-2. `tools/audock query "<terms>" [--tag T] [--type note] [--since YYYY-MM-DD] [--json]`.
-3. Follow `[[wikilinks]]` from top hits. Cite note ids. For exact fidelity, open the
-   `sources:` capture (the lossless path). If absent, say so and offer to INGEST.
+## Look up / query  → QUERY  (lead with the cheapest step)
+1. `tools/audock context "<question>" [--tag T] [--k N]` — bounded, comment-stripped answer
+   pack with provenance; answer most questions from this one call.
+2. `tools/audock query "<terms>" [--tag T] [--type note] [--since DATE] [--json]` — ranked hits.
+3. `tools/audock show <id>` — one note, compact (follow `[[wikilinks]]` by `show`-ing ids).
+4. `tools/audock show <source-id> --raw` — verbatim source for exact quotes/numbers/code.
+5. Cite note ids. If nothing matches, say so and offer to INGEST.
+Avoid Read-ing whole files or browsing `index.md`/MOCs for answers — that costs tokens; the
+CLI output is tiny by design.
 
 ## Tidy  → MAINTAIN
 `tools/audock doctor` → fix orphans (wire into a MOC), broken links, merge duplicates (keep one

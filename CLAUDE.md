@@ -8,6 +8,21 @@ retrieval are deterministic and repeatable, and so the store stays **lossless** 
 The CLI lives at `tools/audock` (run it from the vault root). Prefer it over hand-writing files
 — it fills IDs, dates, hashes, and templates correctly.
 
+## When to reach for Audock (do this proactively — don't wait to be asked)
+
+The CLI is **cheap**: its output is tiny, so probing the vault costs almost nothing. Reading
+whole `.md` files into context is what costs tokens — so probe first, read last.
+
+- **Before answering a factual/technical question**, run `tools/audock context "<question>"`
+  (or `query`). If the vault knows, answer from that compact pack and cite it; this is both
+  cheaper and more correct than answering from memory. If it returns nothing, say so and
+  proceed normally (optionally offer to INGEST what you learn).
+- **When the user shares something worth keeping** (a decision, a finding, a snippet, a link),
+  offer to — or just — INGEST it.
+- **Cost rule:** resolve answers with `context`/`query`/`show` (small, curated output). Only
+  open a full file with Read or `show --raw` when you need exact verbatim bytes. Never slurp
+  the whole vault into context.
+
 ## Invariants (never violate)
 
 1. **`sources/` is append-only and immutable.** Once a capture file is written, never edit its
@@ -52,13 +67,20 @@ note. Steps:
 
 ## QUERY — answering from the vault
 
-1. **Enter at the top.** Read [[index]], then the most relevant `maps/<domain>` MOC.
-2. **Search.** `tools/audock query "<terms>" [--tag <t>] [--type note] [--since <date>]`.
-   This ranks matches over frontmatter + body and prints paths + snippets.
-3. **Traverse.** Follow `[[wikilinks]]` from the best hits to gather connected context.
-4. **Answer with citations** to note ids. When exact fidelity matters (quotes, numbers, code),
-   **drill to the `sources:`** file and read the verbatim capture — this is the lossless path.
-5. If the vault has no answer, say so plainly; don't invent. Offer to INGEST the missing info.
+Lead with the **cheapest** step that answers the question; escalate only if needed:
+
+1. **Answer pack (default, cheapest).** `tools/audock context "<question>" [--tag t] [--k N]`.
+   Returns a bounded, deduped, comment-stripped bundle of the top notes with provenance — enough
+   to answer most questions from one call. It explicitly reports anything it omitted.
+2. **Targeted search.** `tools/audock query "<terms>" [--tag t] [--type note] [--since date]`
+   when you want a ranked list of hits + snippets to pick from.
+3. **Open one item.** `tools/audock show <id>` for a single note (compact: minimal frontmatter +
+   body, comments stripped). Follow `[[wikilinks]]` by `show`-ing the linked ids.
+4. **Lossless drill-down.** For exact quotes/numbers/code, `tools/audock show <source-id> --raw`
+   (or Read the source file) — the verbatim capture is the ground truth.
+5. **Browse** (humans / exploratory): [[index]] → a `maps/<domain>` MOC. Prefer 1–3 for answers;
+   this step costs more tokens.
+6. If the vault has no answer, say so plainly; don't invent. Offer to INGEST the missing info.
 
 ## MAINTAIN — keeping it healthy
 
@@ -87,7 +109,9 @@ past). Then:
 ```
 tools/audock new note|source|moc "Title"
 tools/audock ingest <file|url|-> --type conversation|code|web|manual [--title ..] [--ref ..]
+tools/audock context "question" [--tag t] [--k N] [--max-bytes B]   # cheapest answer path
 tools/audock query "text" [--tag t] [--type note|source|moc] [--since YYYY-MM-DD] [--json]
+tools/audock show <id> [--body | --raw]                             # one item; --raw = verbatim
 tools/audock reindex
 tools/audock doctor
 ```
