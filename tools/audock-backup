@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# audock-backup — RAID-like local backup of an Audock vault, once-a-day friendly.
+#
+# It does three things, all local, no network:
+#   1. commits any pending changes in the vault (git is the history substrate)
+#   2. mirrors the full repo to a bare "replica" (like a RAID-1 copy you can restore from)
+#   3. writes a dated git bundle (a single-file point-in-time snapshot) and prunes old ones
+#
+# Usage:  audock-backup <vault-dir> [backup-root] [keep-days]
+#   backup-root defaults to  ~/.audock-backups
+#   keep-days   defaults to  30  (dated bundles older than this are deleted)
+#
+# Cron (daily at 02:30):
+#   30 2 * * *  /path/to/tools/audock-backup /path/to/Vault >> ~/.audock-backups/backup.log 2>&1
+set -euo pipefail
+
+VAULT="${1:?usage: audock-backup <vault-dir> [backup-root] [keep-days]}"
+BACKUP_ROOT="${2:-$HOME/.audock-backups}"
+KEEP_DAYS="${3:-30}"
+VAULT="$(cd "$VAULT" && pwd)"
+NAME="$(basename "$VAULT")"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+REPLICA="$BACKUP_ROOT/$NAME.git"      # bare mirror (the RAID copy)
+BUNDLES="$BACKUP_ROOT/$NAME-bundles"  # dated snapshots
+
+log(){ printf '[audock-backup %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+mkdir -p "$BACKUP_ROOT" "$BUNDLES"
+
+# 0. ensure the vault is a git repo
+if [ ! -d "$VAULT/.git" ]; then
+  log "initializing git in $VAULT"
+  git -C "$VAULT" init -q
+fi
+
+# 1. commit pending changes (no-op if clean)
+if [ -n "$(git -C "$VAULT" status --porcelain)" ]; then
+  git -C "$VAULT" add -A
+  git -C "$VAULT" -c user.name="audock-backup" -c user.email="audock@localhost" \
+      commit -q -m "backup: snapshot $STAMP"
+  log "committed pending changes"
+else
+  log "working tree clean — nothing to commit"
+fi
+
+# 2. mirror to the bare replica (create on first run, then keep in sync)
+if [ ! -d "$REPLICA" ]; then
+  log "creating replica mirror at $REPLICA"
+  git clone --mirror -q "$VAULT" "$REPLICA"
+else
+  git -C "$VAULT" push --mirror -q "$REPLICA"
+  log "synced replica mirror"
+fi
+
+# 3. dated point-in-time bundle + prune old ones
+BUNDLE="$BUNDLES/$NAME-$STAMP.bundle"
+git -C "$VAULT" bundle create -q "$BUNDLE" --all
+log "wrote bundle $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
+find "$BUNDLES" -name "*.bundle" -type f -mtime "+$KEEP_DAYS" -print -delete \
+  | sed 's/^/  pruned /' || true
+
+log "done. replica: $REPLICA  bundles: $BUNDLES"
+# Restore from replica:  git clone <replica>.git <dir>
+# Restore from bundle:   git clone <file.bundle> <dir>
