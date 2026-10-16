@@ -96,9 +96,12 @@ Lead with the **cheapest** step that answers the question; escalate only if need
 
 ## MAINTAIN — keeping it healthy
 
-Run `tools/audock doctor` to get a report of: orphan notes (no backlinks), broken `[[links]]`,
-duplicate-candidate notes (similar titles/aliases), and stale notes (`updated:` far in the
-past). Then:
+Run `tools/audock doctor` for: orphans, broken `[[links]]`, notes citing missing sources,
+under-linked notes, duplicate/tag-variant candidates, and stale notes. Bulk fixes are easiest
+with `sql` (dry-run first, then `--apply`): retag with
+`UPDATE notes SET tags = tags - 'old', tags = tags + 'new' WHERE tag='old'`; merge duplicates
+with `MERGE '<drop>' INTO '<keep>'` (supersedes the drop, keeps its title as an alias, rewires
+links — never hard-deletes). `sql` never touches `locked`/#human notes. Then:
 - Wire orphans into a MOC or link them from a related note.
 - Fix or remove broken links.
 - Merge duplicates by keeping one canonical note and adding a `## Log` line + alias on it, and
@@ -125,6 +128,8 @@ tools/audock similar "title"                                        # dedup gate
 tools/audock context "question" [--tag t] [--k N] [--all]           # cheapest answer path
 tools/audock query "text" [--tag t] [--type note|source|moc] [--since D] [--all] [--json]
 tools/audock show <id> [--body | --raw]                             # one item; --raw = verbatim
+tools/audock sql "SELECT|UPDATE|MERGE ..." [--apply]                # SQL-style bulk query/edit
+tools/audock backlinks <id>                                         # who links here
 tools/audock log "what you did"                                     # append to today's journal
 tools/audock reindex
 tools/audock doctor

@@ -14,6 +14,7 @@ Commands:
   query "text" [--tag T] [--type T] [--since DATE] [--all] [--json]   ranked BM25 search
   similar "title"                                  top-k similar notes (dedup gate)
   show <id> [--body | --raw]                       one item; --raw = verbatim/lossless
+  sql "<SELECT|UPDATE|MERGE ...>" [--apply]        SQL-style bulk query/edit (dry-run default)
   backlinks <id>                                   notes/MOCs that link to this one
   view <name> [--tag T] [--type T] [--status S]    emit an Obsidian Bases (.base) saved view
   log "message"                                    append a line to today's journal
@@ -879,6 +880,344 @@ def cmd_doctor(args):
         print("\nall clear ✓")
 
 
+# ---------- SQL-style bulk query / edit ----------
+# A familiar SELECT/UPDATE/MERGE dialect over the vault: frontmatter keys are columns, plus
+# pseudo-columns path/text/tags/backlinks/links. UPDATE & MERGE are dry-run unless --apply, never
+# touch `locked`/#locked notes or (immutable) sources, bump `updated`, and log an audit line.
+SQL_TABLES = {"notes": "note", "note": "note", "sources": "source", "source": "source",
+              "maps": "moc", "moc": "moc", "mocs": "moc", "all": None}
+SQL_PROTECTED = {"id", "type", "created", "hash", "captured", "locked"}
+
+
+def _unquote(s):
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+def _sql_rows(table):
+    want = SQL_TABLES.get(table.lower())
+    if table.lower() not in SQL_TABLES:
+        sys.exit(f"sql: unknown table '{table}' (use notes|sources|maps|all)")
+    rows = []
+    for p in md_files():
+        fm, body = parse_frontmatter(read(p))
+        t = fm.get("type")
+        if not t or t == "journal":
+            continue
+        if want and t != want:
+            continue
+        rows.append((p, fm, body))
+    return rows
+
+
+def _backlink_count(p, fm, graph):
+    self_rel = str(p.relative_to(VAULT))
+    return len({srel for k in _keys_of(p, fm) for _, _, srel in graph.get(k, [])
+                if srel != self_rel})
+
+
+def _field_value(field, p, fm, body, graph):
+    f = field.lower()
+    if f == "backlinks":
+        return _backlink_count(p, fm, graph)
+    if f in ("links", "outlinks"):
+        return len(set(_links(body)))
+    if f == "path":
+        return str(p.relative_to(VAULT))
+    if f in ("text", "body"):
+        return body
+    if f in ("tag", "tags"):
+        return as_list(fm.get("tags"))
+    if f in ("alias", "aliases"):
+        return as_list(fm.get("aliases"))
+    if f in ("source", "sources"):
+        return as_list(fm.get("sources"))
+    return fm.get(field, "")
+
+
+def _like_re(pattern):
+    # SQL LIKE: % => any run, _ => any char; everything else literal. (re.escape leaves % and _
+    # untouched, so map them explicitly rather than post-processing an escaped string.)
+    parts = [".*" if c == "%" else "." if c == "_" else re.escape(c) for c in pattern]
+    return "^" + "".join(parts) + "$"
+
+
+def _eval_cond(p, fm, body, graph, cond):
+    field, op, target = cond
+    if re.fullmatch(r"-?\d+(\.\d+)?", field) and op in ("=", "==", "!="):  # WHERE 1=1
+        eq = float(field) == float(target)
+        return eq if op != "!=" else not eq
+    val = _field_value(field, p, fm, body, graph)
+    if op == "ISNULL":
+        return val in (None, "", [])
+    if op == "ISNOTNULL":
+        return val not in (None, "", [])
+    if op in ("=", "==", "!=", "CONTAINS"):
+        if isinstance(val, list):
+            present = any(str(x).lower() == str(target).lower() for x in val)
+        else:
+            present = str(val).lower() == str(target).lower()
+        return (not present) if op == "!=" else present
+    if op in ("LIKE", "NOTLIKE"):
+        hay = " ".join(val) if isinstance(val, list) else str(val)
+        hit = bool(re.match(_like_re(str(target)), hay, re.I | re.S))
+        return hit if op == "LIKE" else not hit
+    if op == "IN":
+        vals = [str(t).lower() for t in target]
+        if isinstance(val, list):
+            return any(str(x).lower() in vals for x in val)
+        return str(val).lower() in vals
+    if op in (">", "<", ">=", "<="):
+        try:
+            a, b = float(val), float(target)
+        except (TypeError, ValueError):
+            return False
+        return {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[op]
+    return False
+
+
+def _parse_cond(c):
+    c = c.strip()
+    m = re.match(r"(\w+)\s+IS\s+NOT\s+NULL$", c, re.I)
+    if m:
+        return (m.group(1), "ISNOTNULL", None)
+    m = re.match(r"(\w+)\s+IS\s+NULL$", c, re.I)
+    if m:
+        return (m.group(1), "ISNULL", None)
+    m = re.match(r"(\w+)\s+(NOT\s+LIKE|LIKE|CONTAINS|IN)\s+(.+)$", c, re.I)
+    if m:
+        field, op, rhs = m.group(1), m.group(2).upper().replace(" ", ""), m.group(3).strip()
+        if op == "IN":
+            inner = rhs.strip()[1:-1] if rhs.startswith("(") else rhs
+            return (field, "IN", [_unquote(x) for x in _split_inline_list(inner)])
+        return (field, op, _unquote(rhs))
+    m = re.match(r"(\w+|\d+)\s*(>=|<=|!=|=|>|<)\s*(.+)$", c)
+    if m:
+        return (m.group(1), m.group(2), _unquote(m.group(3)))
+    sys.exit(f"sql: cannot parse condition: {c!r}")
+
+
+def _parse_where(where):
+    if not where:
+        return None
+    return [[_parse_cond(c) for c in re.split(r"\s+AND\s+", part, flags=re.I)]
+            for part in re.split(r"\s+OR\s+", where, flags=re.I)]
+
+
+def _match(p, fm, body, graph, conds):
+    if conds is None:
+        return True
+    return any(all(_eval_cond(p, fm, body, graph, c) for c in ands) for ands in conds)
+
+
+def _set_fm_field(raw, key, value_str):
+    lines = raw.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return raw
+    close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if close is None:
+        return raw
+    pat = re.compile(rf"^{re.escape(key)}\s*:\s*.*$")
+    for i in range(1, close):
+        if pat.match(lines[i]):
+            lines[i] = f"{key}: {value_str}"
+            return "\n".join(lines)
+    lines.insert(close, f"{key}: {value_str}")
+    return "\n".join(lines)
+
+
+def _append_log(raw, line):
+    lines = raw.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.strip().lower() == "## log":
+            lines.insert(i + 1, line)
+            return "\n".join(lines)
+    return raw.rstrip() + f"\n\n## Log\n{line}\n"
+
+
+def _is_locked(fm):
+    return str(fm.get("locked", "")).lower() == "true" or "locked" in as_list(fm.get("tags"))
+
+
+def _sql_select(stmt, args):
+    m = re.match(r"SELECT\s+(.+?)\s+FROM\s+(\w+)(.*)$", stmt, re.I | re.S)
+    if not m:
+        sys.exit("sql: SELECT <cols> FROM <table> [WHERE ...] [ORDER BY col [DESC]] [LIMIT n]")
+    cols_s, table, rest = m.group(1), m.group(2), m.group(3)
+    wm = re.search(r"\bWHERE\s+(.+?)(?=\bORDER\s+BY\b|\bLIMIT\b|$)", rest, re.I | re.S)
+    om = re.search(r"\bORDER\s+BY\s+(\w+)(\s+DESC)?", rest, re.I)
+    lm = re.search(r"\bLIMIT\s+(\d+)", rest, re.I)
+    conds = _parse_where(wm.group(1).strip() if wm else None)
+    cols = (["path", "title", "status", "tags"] if cols_s.strip() == "*"
+            else [c.strip() for c in _split_inline_list(cols_s)])
+    graph = _link_graph()
+    out = []
+    for p, fm, body in _sql_rows(table):
+        if _match(p, fm, body, graph, conds):
+            out.append((p, fm, body))
+    if om:
+        key = om.group(1)
+        out.sort(key=lambda r: str(_field_value(key, r[0], r[1], r[2], graph)),
+                 reverse=bool(om.group(2)))
+    if lm:
+        out = out[: int(lm.group(1))]
+    print(" | ".join(cols))
+    for p, fm, body in out:
+        vals = []
+        for c in cols:
+            v = _field_value(c, p, fm, body, graph)
+            vals.append(", ".join(map(str, v)) if isinstance(v, list) else str(v))
+        print(" | ".join(vals))
+    print(f"-- {len(out)} row(s)")
+
+
+def _parse_assignments(set_s):
+    assigns = []
+    for a in _split_inline_list(set_s):
+        m = re.match(r"(\w+)\s*=\s*(.+)$", a.strip(), re.S)
+        if not m:
+            sys.exit(f"sql: cannot parse assignment: {a!r}")
+        field, rhs = m.group(1), m.group(2).strip()
+        if field.lower() in SQL_PROTECTED:
+            sys.exit(f"sql: field '{field}' is protected and cannot be set")
+        if rhs.upper() == "NULL":
+            assigns.append((field, "clear", None))
+        elif re.match(rf"{re.escape(field)}\s*\+\s*", rhs):
+            assigns.append((field, "list_add", _unquote(rhs.split("+", 1)[1])))
+        elif re.match(rf"{re.escape(field)}\s*-\s*", rhs):
+            assigns.append((field, "list_remove", _unquote(rhs.split("-", 1)[1])))
+        else:
+            assigns.append((field, "set", _unquote(rhs)))
+    return assigns
+
+
+def _sql_update(stmt, args):
+    m = re.match(r"UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)$", stmt, re.I | re.S)
+    if not m:
+        sys.exit("sql: UPDATE <table> SET <a=b,...> WHERE <conds>  (use WHERE 1=1 for all)")
+    table, set_s, where = m.group(1), m.group(2), m.group(3)
+    assigns = _parse_assignments(set_s)
+    conds = _parse_where(where)
+    graph = _link_graph()
+    changed, locked_skip = [], []
+    for p, fm, body in _sql_rows(table):
+        if fm.get("type") == "source":
+            continue  # sources are immutable
+        if not _match(p, fm, body, graph, conds):
+            continue
+        if _is_locked(fm):
+            locked_skip.append(str(p.relative_to(VAULT)))
+            continue
+        raw = read(p)
+        new = raw
+        notes = []
+        for field, kind, arg in assigns:
+            if kind == "set":
+                new = _set_fm_field(new, field, arg)
+                notes.append(f"{field}={arg!r}")
+            elif kind == "clear":
+                new = _set_fm_field(new, field, "")
+                notes.append(f"{field}=NULL")
+            else:  # list_add / list_remove
+                cur = as_list(parse_frontmatter(new)[0].get(field))
+                if kind == "list_add" and arg not in cur:
+                    cur.append(arg)
+                elif kind == "list_remove":
+                    cur = [x for x in cur if x != arg]
+                new = _set_fm_field(new, field, "[" + ", ".join(cur) + "]")
+                notes.append(f"{field}{'+' if kind == 'list_add' else '-'}={arg!r}")
+        if new != raw:
+            new = _set_fm_field(new, "updated", today())
+            if fm.get("type") == "note":
+                new = _append_log(new, f"- {today()} — sql: {', '.join(notes)}")
+            changed.append(str(p.relative_to(VAULT)))
+            if args.apply:
+                p.write_text(new, encoding="utf-8")
+    verb = "updated" if args.apply else "would update (dry-run)"
+    print(f"{verb}: {len(changed)} file(s)")
+    for c in changed:
+        print(f"  ~ {c}")
+    if locked_skip:
+        print(f"skipped {len(locked_skip)} locked/human-owned: {', '.join(locked_skip)}")
+    if changed and not args.apply:
+        print("\n(dry-run — re-run with --apply to write, then git commit)")
+
+
+def _rewrite_links(raw, drop_keys, keep_id):
+    def repl(m):
+        inner = m.group(1)
+        head = re.split(r"[|#]", inner)[0]
+        if head.strip().lower() in drop_keys:
+            return f"[[{keep_id}{inner[len(head):]}]]"
+        return m.group(0)
+    return re.sub(r"\[\[([^\]]+)\]\]", repl, raw)
+
+
+def _sql_merge(stmt, args):
+    m = re.match(r"MERGE\s+(.+?)\s+INTO\s+(.+)$", stmt, re.I)
+    if not m:
+        sys.exit("sql: MERGE '<drop>' INTO '<keep>'")
+    dhit, khit = _resolve(_unquote(m.group(1))), _resolve(_unquote(m.group(2)))
+    if not dhit:
+        sys.exit(f"sql: merge source not found: {m.group(1)}")
+    if not khit:
+        sys.exit(f"sql: merge target not found: {m.group(2)}")
+    dp, dfm, dbody = dhit
+    kp, kfm, kbody = khit
+    if dp == kp:
+        sys.exit("sql: cannot merge a note into itself")
+    if _is_locked(dfm) or _is_locked(kfm):
+        sys.exit("sql: refusing to merge a locked/human-owned note")
+    keep_id = kfm.get("id") or kp.stem
+    drop_keys = _keys_of(dp, dfm)
+    rewired = []
+    for p in md_files():
+        fm, _ = parse_frontmatter(read(p))
+        if fm.get("type") in (None, "journal", "source") or p == dp:
+            continue
+        raw = read(p)
+        new = _rewrite_links(raw, drop_keys, keep_id)
+        if new != raw:
+            rewired.append(str(p.relative_to(VAULT)))
+            if args.apply:
+                p.write_text(new, encoding="utf-8")
+    # keep: alias of the dropped title + a log line
+    kraw = read(kp)
+    aliases = as_list(kfm.get("aliases"))
+    if dfm.get("title") and dfm.get("title") not in aliases:
+        aliases.append(dfm.get("title"))
+    kraw = _set_fm_field(kraw, "aliases", "[" + ", ".join(aliases) + "]")
+    kraw = _append_log(kraw, f"- {today()} — sql: merged [[{dfm.get('id')}]] into this note")
+    # drop: tombstone pointing at keep, superseded (history preserved, never deleted)
+    draw = read(dp)
+    draw = _set_fm_field(draw, "status", "superseded")
+    draw = _set_fm_field(draw, "superseded_by", f'"[[{keep_id}]]"')
+    draw = _append_log(draw, f"- {today()} — sql: merged into [[{keep_id}]]")
+    if args.apply:
+        kp.write_text(kraw, encoding="utf-8")
+        dp.write_text(draw, encoding="utf-8")
+    verb = "merged" if args.apply else "would merge (dry-run)"
+    print(f"{verb}: {dfm.get('title')} [[{dfm.get('id')}]] -> {kfm.get('title')} [[{keep_id}]]")
+    print(f"  links rewired in {len(rewired)} file(s); drop note superseded; title kept as alias")
+    if not args.apply:
+        print("\n(dry-run — re-run with --apply to write, then git commit)")
+
+
+def cmd_sql(args):
+    stmt = args.statement.strip().rstrip(";")
+    kw = (stmt.split(None, 1)[0] if stmt else "").upper()
+    if kw == "SELECT":
+        _sql_select(stmt, args)
+    elif kw == "UPDATE":
+        _sql_update(stmt, args)
+    elif kw == "MERGE":
+        _sql_merge(stmt, args)
+    else:
+        sys.exit("sql: statement must start with SELECT, UPDATE, or MERGE")
+
+
 # ---------- init / bootstrap ----------
 
 GRAPH_GROUPS = [
@@ -1178,6 +1517,12 @@ def main():
                      help="size cap for the pack")
     p_c.add_argument("--all", action="store_true", help="include superseded notes")
     p_c.set_defaults(func=cmd_context)
+
+    p_sql = sub.add_parser("sql", help="SQL-style SELECT/UPDATE/MERGE over the vault")
+    p_sql.add_argument("statement", help="e.g. \"UPDATE notes SET status='stable' WHERE tag='audock'\"")
+    p_sql.add_argument("--apply", action="store_true",
+                       help="write changes (UPDATE/MERGE are dry-run without it)")
+    p_sql.set_defaults(func=cmd_sql)
 
     p_bl = sub.add_parser("backlinks", help="notes/MOCs that link to a given note")
     p_bl.add_argument("id", help="id / title / alias / filename stem")

@@ -1,5 +1,9 @@
 # Audock
 
+<!-- license badge -->
+*Open source under the [MIT License](LICENSE) — © 2026 Parth Kshirsagar. Free to use and modify; keep the copyright notice.*
+
+
 An automatically-maintained, Obsidian-compatible documentation knowledge base. Claude acts as
 the librarian: it ingests raw material (conversations, code, web pages, manual notes), distills
 it into atomic linked notes, and queries it on demand. Everything is plain Markdown so it opens
