@@ -134,6 +134,7 @@ def _split_inline_list(inner):
 
 def parse_frontmatter(text):
     """Return (dict, body). Tolerant of scalars, inline [lists], and block - lists."""
+    text = text.lstrip("﻿")  # tolerate a UTF-8 BOM (Windows editors) — else frontmatter hides
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return {}, text
@@ -298,10 +299,21 @@ def _load_body(src, kind):
     if src == "-":
         return sys.stdin.read(), "stdin"
     if re.match(r"^https?://", src):
+        import ipaddress
+        import socket
+        import urllib.parse
+        host = urllib.parse.urlparse(src).hostname or ""
+        try:  # SSRF guard: refuse internal/metadata addresses
+            ip = ipaddress.ip_address(socket.gethostbyname(host))
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast):
+                return f"(refused to fetch {src}: resolves to a non-public address)", src
+        except (socket.gaierror, ValueError):
+            pass
         try:
             req = urllib.request.Request(src, headers={"User-Agent": "audock/1.0"})
             with urllib.request.urlopen(req, timeout=20) as r:
-                raw = r.read().decode("utf-8", errors="replace")
+                raw = r.read(8_000_000).decode("utf-8", errors="replace")  # 8 MB cap, no OOM
             return raw, src
         except Exception as e:  # noqa: BLE001 — capture reference even if fetch fails
             return f"(could not fetch {src}: {e})", src
@@ -364,8 +376,9 @@ FIELD_W = {"title": 6, "summary": 4, "aliases": 3, "tags": 2, "body": 1}
 
 
 def _words(text):
-    """Lowercase alphanumeric words (splits `domain/ml` → domain, ml); drops stopwords."""
-    return [w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+    """Lowercase word tokens, unicode-aware (splits `domain/ml` → domain, ml; keeps accents/CJK);
+    drops the underscore and stopwords."""
+    return [w for w in re.findall(r"[^\W_]+", str(text).lower(), re.UNICODE)
             if len(w) >= 2 and w not in STOPWORDS]
 
 
@@ -659,14 +672,11 @@ def cmd_view(args):
     conds = []
     if not args.all:
         conds.append('note.status != "superseded"')
-    if args.tag:
-        conds.append(f'file.hasTag("{args.tag}")')
-    if args.type:
-        conds.append(f'note.type == "{args.type}"')
-    else:
-        conds.append('note.type == "note"')
+    if args.tag:  # json.dumps so a value with quotes can't break/alter the filter YAML
+        conds.append(f"file.hasTag({json.dumps(args.tag)})")
+    conds.append(f"note.type == {json.dumps(args.type or 'note')}")
     if args.status:
-        conds.append(f'note.status == "{args.status}"')
+        conds.append(f"note.status == {json.dumps(args.status)}")
     filt = "\n".join(f"    - {c}" for c in conds)
     base = (f"filters:\n  and:\n{filt}\n"
             f"views:\n  - type: table\n    name: {json.dumps(name)}\n"
@@ -686,6 +696,31 @@ def _replace_block(text, begin, end, new_inner):
     return text  # markers missing; leave untouched
 
 
+# Distinct hues for auto-coloring graph groups by domain (readable in light & dark).
+GRAPH_PALETTE = [0x4C8DFF, 0x57C785, 0xE0A458, 0xA66BE0, 0xE05A8A, 0x4FC3C7,
+                 0xE0C040, 0xF07178, 0x9CCC65, 0x7E9CFF, 0xD98A5B, 0x5BC0BE]
+
+
+def _apply_graph_colors(slugs):
+    """Regenerate .obsidian/graph.json colorGroups: one hue per domain (MOC) so the graph is
+    colored by group automatically, plus de-emphasized sources and accented index/tags. Other
+    graph settings (zoom, forces) are preserved."""
+    import json
+    gp = VAULT / ".obsidian" / "graph.json"
+    try:
+        g = json.loads(read(gp)) if gp.exists() else dict(EMB_GRAPH)
+    except Exception:  # noqa: BLE001
+        g = dict(EMB_GRAPH)
+    groups = [{"query": f"tag:#{s}", "color": {"a": 1, "rgb": GRAPH_PALETTE[i % len(GRAPH_PALETTE)]}}
+              for i, s in enumerate(sorted(set(slugs)))]
+    groups.append({"query": "path:sources/", "color": {"a": 1, "rgb": 0x8A8F98}})
+    groups.append({"query": "file:index OR file:tags", "color": {"a": 1, "rgb": 0xE05A5A}})
+    g["colorGroups"] = groups
+    gp.parent.mkdir(parents=True, exist_ok=True)
+    gp.write_text(json.dumps(g, indent=2), encoding="utf-8")
+    return len(groups)
+
+
 def cmd_reindex(args):
     # 1) tags.md static block
     tag_map = {}
@@ -701,22 +736,23 @@ def cmd_reindex(args):
     inner = "\n".join(lines) if lines else "- (no tags yet)"
     tags_path = VAULT / "tags.md"
     tags_path.write_text(
-        _replace_block(read(tags_path), "<!-- AUDOCK:TAGS:BEGIN -->",
-                       "<!-- AUDOCK:TAGS:END -->", inner),
+        _replace_block(read(tags_path) if tags_path.exists() else EMB_TAGS,
+                       "<!-- AUDOCK:TAGS:BEGIN -->", "<!-- AUDOCK:TAGS:END -->", inner),
         encoding="utf-8",
     )
 
     # 2) index.md maps list
-    maps = []
+    maps, moc_slugs = [], []
     for p in md_files(VAULT / "maps"):
         fm, _ = parse_frontmatter(read(p))
         maps.append((fm.get("title") or p.stem, fm.get("id") or p.stem))
+        moc_slugs.append(p.stem)
     maps_inner = ("\n".join(f"- [[{mid}|{title}]]" for title, mid in sorted(maps))
                   if maps else "- (none yet)")
     index_path = VAULT / "index.md"
     index_path.write_text(
-        _replace_block(read(index_path), "<!-- AUDOCK:MAPS:BEGIN -->",
-                       "<!-- AUDOCK:MAPS:END -->", maps_inner),
+        _replace_block(read(index_path) if index_path.exists() else EMB_INDEX,
+                       "<!-- AUDOCK:MAPS:BEGIN -->", "<!-- AUDOCK:MAPS:END -->", maps_inner),
         encoding="utf-8",
     )
 
@@ -727,8 +763,8 @@ def cmd_reindex(args):
         BEG, END = "<!-- AUDOCK:RELATED:BEGIN -->", "<!-- AUDOCK:RELATED:END -->"
         for p in md_files(VAULT / "notes"):
             fm, body = parse_frontmatter(read(p))
-            if fm.get("type") != "note":
-                continue
+            if fm.get("type") != "note" or _is_locked(fm):
+                continue  # never write into human-owned notes
             self_rel = str(p.relative_to(VAULT))
             rows, seen = [], set()
             for k in _keys_of(p, fm):
@@ -745,8 +781,10 @@ def cmd_reindex(args):
             if new != raw:
                 p.write_text(new, encoding="utf-8")
                 related_n += 1
+    # 4) auto-color graph groups by domain (one hue per MOC)
+    ncolors = _apply_graph_colors(moc_slugs)
     tail = f", {related_n} related blocks" if getattr(args, "related", False) else ""
-    print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps{tail}")
+    print(f"reindexed: {len(tag_map)} tags, {len(maps)} maps, {ncolors} graph colors{tail}")
 
 
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
@@ -795,7 +833,7 @@ def cmd_doctor(args):
         fm, body = parse_frontmatter(read(p))
         rel = str(p.relative_to(VAULT))
         if fm.get("type") == "note":
-            notes.append((p, fm))
+            notes.append((p, fm, body))  # keep body to avoid re-reading each note later
         # Generated indexes and the journal list/mention notes but aren't semantic backlinks;
         # source bodies are verbatim captures (any [[...]] in them is incidental, not a link).
         if rel in GENERATED or fm.get("type") in ("journal", "source"):
@@ -808,16 +846,17 @@ def cmd_doctor(args):
                 incoming[tgt.lower()] = incoming.get(tgt.lower(), 0) + 1
 
     # orphans: type==note with no incoming link by id/title/filename
+    incoming_set = set(incoming)
     orphans = []
-    for p, fm in notes:
+    for p, fm, _ in notes:
         keys = {str(fm.get("id", "")).lower(), str(fm.get("title", "")).lower(), p.stem.lower()}
         keys |= {a.lower() for a in as_list(fm.get("aliases"))}
-        if not (keys & set(incoming)):
+        if not (keys & incoming_set):
             orphans.append(str(p.relative_to(VAULT)))
 
     # duplicate candidates: same slugified title
     by_slug = {}
-    for p, fm in notes:
+    for p, fm, _ in notes:
         by_slug.setdefault(slugify(str(fm.get("title", p.stem))), []).append(
             str(p.relative_to(VAULT)))
     dups = {k: v for k, v in by_slug.items() if len(v) > 1}
@@ -825,7 +864,7 @@ def cmd_doctor(args):
     # stale: updated older than STALE_DAYS
     cutoff = (date.today() - timedelta(days=STALE_DAYS)).isoformat()
     stale = []
-    for p, fm in notes:
+    for p, fm, _ in notes:
         stamp = str(fm.get("updated") or fm.get("created") or "")[:10]
         if stamp and stamp < cutoff:
             stale.append((str(p.relative_to(VAULT)), stamp))
@@ -839,7 +878,7 @@ def cmd_doctor(args):
 
     # notes whose sources: cite a capture that no longer exists (broken provenance)
     missing_src, underlinked = [], []
-    for p, fm in notes:
+    for p, fm, body in notes:
         rel = str(p.relative_to(VAULT))
         for s in as_list(fm.get("sources")):
             tgts = _links(s) or [s]
@@ -847,21 +886,19 @@ def cmd_doctor(args):
                 if t.strip().lower() not in source_names:
                     missing_src.append(f"{rel} -> {t}")
         # under-linked: fewer than 2 outgoing wikilinks (weakly wired into the graph)
-        body = parse_frontmatter(read(p))[1]
         if len(_links(body)) < 2:
             underlinked.append(rel)
 
     # tag hygiene: tags that normalize to the same key (case/plural/_-/ variants) → merge
     norm = {}
-    for _, fm in notes:
+    for _, fm, _ in notes:
         for tg in as_list(fm.get("tags")):
             key = "/".join(_stem(seg) for seg in str(tg).lower().replace("_", "-").split("/"))
             norm.setdefault(key, set()).add(tg)
     tag_variants = {k: sorted(v) for k, v in norm.items() if len(v) > 1}
 
     # locked = human-owned; informational so you can see what Claude must not touch
-    locked = [str(p.relative_to(VAULT)) for p, fm in notes
-              if str(fm.get("locked", "")).lower() == "true" or "locked" in as_list(fm.get("tags"))]
+    locked = [str(p.relative_to(VAULT)) for p, fm, _ in notes if _is_locked(fm)]
 
     def section(title, items):
         print(f"\n{title}: {len(items)}")
@@ -894,6 +931,36 @@ def _unquote(s):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
         return s[1:-1]
     return s
+
+
+def _split_outside_quotes(s, sep_re):
+    """Split `s` on regex `sep_re`, but only where it occurs OUTSIDE single/double quotes —
+    so `WHERE title = 'Rock AND Roll'` doesn't split on the AND inside the value."""
+    out, last, i, q = [], 0, 0, None
+    while i < len(s):
+        c = s[i]
+        if q:
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c in "\"'":
+            q = c
+            i += 1
+            continue
+        m = sep_re.match(s, i)
+        if m and m.end() > i:
+            out.append(s[last:i])
+            last = i = m.end()
+            continue
+        i += 1
+    out.append(s[last:])
+    return out
+
+
+_RE_OR = re.compile(r"\s+OR\s+", re.I)
+_RE_AND = re.compile(r"\s+AND\s+", re.I)
+_RE_WHERE = re.compile(r"\s+WHERE\s+", re.I)
 
 
 def _sql_rows(table):
@@ -934,7 +1001,7 @@ def _field_value(field, p, fm, body, graph):
         return as_list(fm.get("aliases"))
     if f in ("source", "sources"):
         return as_list(fm.get("sources"))
-    return fm.get(field, "")
+    return fm.get(field, fm.get(f, ""))  # case-insensitive fall-through for real columns
 
 
 def _like_re(pattern):
@@ -947,7 +1014,10 @@ def _like_re(pattern):
 def _eval_cond(p, fm, body, graph, cond):
     field, op, target = cond
     if re.fullmatch(r"-?\d+(\.\d+)?", field) and op in ("=", "==", "!="):  # WHERE 1=1
-        eq = float(field) == float(target)
+        try:
+            eq = float(field) == float(target)
+        except (TypeError, ValueError):
+            return False
         return eq if op != "!=" else not eq
     val = _field_value(field, p, fm, body, graph)
     if op == "ISNULL":
@@ -980,20 +1050,20 @@ def _eval_cond(p, fm, body, graph, cond):
 
 def _parse_cond(c):
     c = c.strip()
-    m = re.match(r"(\w+)\s+IS\s+NOT\s+NULL$", c, re.I)
+    m = re.match(r"([\w-]+)\s+IS\s+NOT\s+NULL$", c, re.I)
     if m:
         return (m.group(1), "ISNOTNULL", None)
-    m = re.match(r"(\w+)\s+IS\s+NULL$", c, re.I)
+    m = re.match(r"([\w-]+)\s+IS\s+NULL$", c, re.I)
     if m:
         return (m.group(1), "ISNULL", None)
-    m = re.match(r"(\w+)\s+(NOT\s+LIKE|LIKE|CONTAINS|IN)\s+(.+)$", c, re.I)
+    m = re.match(r"([\w-]+)\s+(NOT\s+LIKE|LIKE|CONTAINS|IN)\s+(.+)$", c, re.I)
     if m:
         field, op, rhs = m.group(1), m.group(2).upper().replace(" ", ""), m.group(3).strip()
         if op == "IN":
             inner = rhs.strip()[1:-1] if rhs.startswith("(") else rhs
             return (field, "IN", [_unquote(x) for x in _split_inline_list(inner)])
         return (field, op, _unquote(rhs))
-    m = re.match(r"(\w+|\d+)\s*(>=|<=|!=|=|>|<)\s*(.+)$", c)
+    m = re.match(r"([\w-]+)\s*(>=|<=|!=|=|>|<)\s*(.+)$", c)
     if m:
         return (m.group(1), m.group(2), _unquote(m.group(3)))
     sys.exit(f"sql: cannot parse condition: {c!r}")
@@ -1002,8 +1072,8 @@ def _parse_cond(c):
 def _parse_where(where):
     if not where:
         return None
-    return [[_parse_cond(c) for c in re.split(r"\s+AND\s+", part, flags=re.I)]
-            for part in re.split(r"\s+OR\s+", where, flags=re.I)]
+    return [[_parse_cond(c) for c in _split_outside_quotes(part, _RE_AND)]
+            for part in _split_outside_quotes(where, _RE_OR)]
 
 
 def _match(p, fm, body, graph, conds):
@@ -1022,6 +1092,12 @@ def _set_fm_field(raw, key, value_str):
     pat = re.compile(rf"^{re.escape(key)}\s*:\s*.*$")
     for i in range(1, close):
         if pat.match(lines[i]):
+            # consume any following indented continuation / block-list lines that belong to this
+            # key, so replacing `aliases:` (block list) doesn't leave dangling `  - x` → broken YAML
+            j = i + 1
+            while j < close and lines[j][:1] in (" ", "\t") and lines[j].strip():
+                j += 1
+            del lines[i + 1:j]
             lines[i] = f"{key}: {value_str}"
             return "\n".join(lines)
     lines.insert(close, f"{key}: {value_str}")
@@ -1059,8 +1135,14 @@ def _sql_select(stmt, args):
             out.append((p, fm, body))
     if om:
         key = om.group(1)
-        out.sort(key=lambda r: str(_field_value(key, r[0], r[1], r[2], graph)),
-                 reverse=bool(om.group(2)))
+        numeric = key.lower() in ("backlinks", "links", "outlinks")
+
+        def _ordk(r):
+            v = _field_value(key, r[0], r[1], r[2], graph)
+            if numeric:
+                return float(v) if str(v).replace(".", "", 1).isdigit() else 0.0
+            return str(v)
+        out.sort(key=_ordk, reverse=bool(om.group(2)))
     if lm:
         out = out[: int(lm.group(1))]
     print(" | ".join(cols))
@@ -1094,10 +1176,14 @@ def _parse_assignments(set_s):
 
 
 def _sql_update(stmt, args):
-    m = re.match(r"UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)$", stmt, re.I | re.S)
+    m = re.match(r"UPDATE\s+(\w+)\s+SET\s+(.+)$", stmt, re.I | re.S)
     if not m:
         sys.exit("sql: UPDATE <table> SET <a=b,...> WHERE <conds>  (use WHERE 1=1 for all)")
-    table, set_s, where = m.group(1), m.group(2), m.group(3)
+    table = m.group(1)
+    segs = _split_outside_quotes(m.group(2), _RE_WHERE)  # split SET/WHERE outside quotes
+    if len(segs) < 2:
+        sys.exit("sql: UPDATE requires a WHERE clause (use WHERE 1=1 to match all)")
+    set_s, where = segs[0], " WHERE ".join(segs[1:])
     assigns = _parse_assignments(set_s)
     conds = _parse_where(where)
     graph = _link_graph()
@@ -1168,6 +1254,8 @@ def _sql_merge(stmt, args):
     kp, kfm, kbody = khit
     if dp == kp:
         sys.exit("sql: cannot merge a note into itself")
+    if dfm.get("type") not in ("note", "moc") or kfm.get("type") not in ("note", "moc"):
+        sys.exit("sql: MERGE only operates on notes/MOCs (sources are immutable)")
     if _is_locked(dfm) or _is_locked(kfm):
         sys.exit("sql: refusing to merge a locked/human-owned note")
     keep_id = kfm.get("id") or kp.stem
@@ -1175,8 +1263,8 @@ def _sql_merge(stmt, args):
     rewired = []
     for p in md_files():
         fm, _ = parse_frontmatter(read(p))
-        if fm.get("type") in (None, "journal", "source") or p == dp:
-            continue
+        if fm.get("type") in (None, "journal", "source") or p == dp or _is_locked(fm):
+            continue  # never rewrite verbatim sources or human-owned notes
         raw = read(p)
         new = _rewrite_links(raw, drop_keys, keep_id)
         if new != raw:

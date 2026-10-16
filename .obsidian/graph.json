@@ -8,24 +8,45 @@
   "collapse-color-groups": false,
   "colorGroups": [
     {
-      "query": "path:notes/",
+      "query": "tag:#agentic-memory",
       "color": {
         "a": 1,
-        "rgb": 5016575
+        "rgb": 5017087
       }
     },
     {
-      "query": "path:sources/",
+      "query": "tag:#audock",
+      "color": {
+        "a": 1,
+        "rgb": 5752709
+      }
+    },
+    {
+      "query": "tag:#information-retrieval",
       "color": {
         "a": 1,
         "rgb": 14722136
       }
     },
     {
-      "query": "path:maps/",
+      "query": "tag:#knowledge-management",
       "color": {
         "a": 1,
-        "rgb": 5752197
+        "rgb": 10906592
+      }
+    },
+    {
+      "query": "tag:#machine-learning",
+      "color": {
+        "a": 1,
+        "rgb": 14703242
+      }
+    },
+    {
+      "query": "path:sources/",
+      "color": {
+        "a": 1,
+        "rgb": 9080728
       }
     },
     {
