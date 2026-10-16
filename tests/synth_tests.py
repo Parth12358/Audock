@@ -15,6 +15,7 @@ shutil.rmtree(SB, ignore_errors=True); SB.mkdir(parents=True)
 M = types.ModuleType("audock")
 M.__dict__.update(__name__="audock_test", __file__=str(AUDOCK))
 exec(compile(AUDOCK.read_text(), str(AUDOCK), "exec"), M.__dict__)
+as_list_ = M.as_list
 
 RESULTS = {}
 FAILS = []
@@ -238,7 +239,7 @@ def make_vault(name, n=30, locked_frac=0.0):
         tags = R.sample(["ml", "infra", "ops", "domain/ml"], R.randint(1, 2)) + (["locked"] if locked and R.random() < 0.3 else [])
         links = " ".join(f"[[n{R.randrange(n):03d}]]" for _ in range(2))
         style = R.choice(["inline", "flush"])
-        al = "aliases: [Alias {i}]" if style == "inline" else f"aliases:\n- Alias {i}"
+        al = f"aliases: [Alias {i}]" if style == "inline" else f"aliases:\n- Alias {i}"
         (v / f"notes/n{i:03d}.md").write_text(
             f"---\nid: {ids[i]}\ntitle: Note {i} {R.choice(WORDS)}\ntype: note\ntags: [{', '.join(tags)}]\n"
             f"summary: {phrase(5)}\ncreated: 2026-01-01\nupdated: 2026-01-02\n{al}\n"
@@ -498,6 +499,131 @@ for i in range(4):
     check("L backup", r3.returncode != 0 and "WARNING: commit failed" in r3.stdout and "synced replica" in r3.stdout,
           f"commit-failure handling: rc={r3.returncode} out={r3.stdout[-300:]}")
     check("L backup", "Traceback" not in r3.stderr)
+
+# ======================================================================================
+# M. sql writes stay real YAML that Obsidian reads back as intended (needs PyYAML) (≈120)
+# ======================================================================================
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    print("note: PyYAML not installed — skipping group M (pip install pyyaml)")
+
+
+def fm_block(text):
+    t = text.lstrip("﻿").replace("\r\n", "\n")
+    if not t.startswith("---\n"):
+        return None
+    end = t.find("\n---", 4)
+    return t[4:end] if end != -1 else None
+
+
+if yaml:
+    NASTY = ["a: b", "x #not a comment", "[bracketed]", "true", "null", "-dash", "say \"hi\"",
+             "it's", "has, comma", "[[a link]]", "  padded  ", "日本語: ok", "50%", "@at", "plain words"]
+    YV = make_vault("yaml", n=12)
+    for i in range(40):
+        val = R.choice(NASTY)
+        field = R.choice(["summary", "status", "title", "custom-field"])
+        litem = R.choice(NASTY).strip() or "x"
+        stmt = R.choice([
+            f"UPDATE notes SET {field} = {qv(val)} WHERE 1=1",
+            f"UPDATE notes SET aliases = aliases + {qv(litem)} WHERE 1=1",
+            f"UPDATE notes SET tags = tags - 'ml', tags = tags + {qv(litem)} WHERE tag='ml'",
+            f"UPDATE notes SET sources = [{qv('[[x]]')}, {qv(litem)}] WHERE 1=1",
+        ])
+        rc, out, err = run(["sql", stmt, "--apply"], cwd=YV)
+        check("M YAML validity", rc == 0 and no_tb(err), f"stmt={stmt} rc={rc} err={err[-200:]}")
+        for p in sorted(YV.glob("notes/*.md"))[:2]:  # every touched note must be valid YAML
+            blk = fm_block(p.read_text())
+            try:
+                y = yaml.safe_load(blk)
+                ours, _ = M.parse_frontmatter(p.read_text())
+                ok = isinstance(y, dict)
+                if ok and stmt.startswith(f"UPDATE notes SET {field} = "):
+                    ok = str(y.get(field)) == val and ours.get(field) == val
+                if ok and "aliases = aliases +" in stmt:
+                    ok = litem in [str(x) for x in (y.get("aliases") or [])] and litem in as_list_(ours.get("aliases"))
+                check("M YAML validity", ok, f"stmt={stmt}\n{blk}\nyaml={y}")
+            except Exception as e:  # noqa: BLE001
+                check("M YAML validity", False, f"stmt={stmt} YAML error {e}\n{blk}")
+    # MERGE with a nasty title → keep note's aliases still valid YAML containing that title
+    for i in range(10):
+        a, b = R.sample(range(12), 2)
+        pa = YV / f"notes/n{a:03d}.md"
+        title = R.choice(["Fusion: ranks, fused", "x #y", "[weird]", "it's \"quoted\""])
+        txt = re.sub(r"^title: .*$", lambda _m: "title: " + json.dumps(title), pa.read_text(), flags=re.M)
+        txt = re.sub(r"^status: .*$", "status: stable", txt, flags=re.M)
+        pa.write_text(txt)
+        ida = M.parse_frontmatter(pa.read_text())[0]["id"]
+        idb = M.parse_frontmatter((YV / f"notes/n{b:03d}.md").read_text())[0]["id"]
+        rc, out, err = run(["sql", f"MERGE '{ida}' INTO '{idb}'", "--apply"], cwd=YV)
+        blk = fm_block((YV / f"notes/n{b:03d}.md").read_text())
+        try:
+            y = yaml.safe_load(blk)
+            ok = rc == 0 and title in [str(x) for x in (y.get("aliases") or [])]
+        except Exception as e:  # noqa: BLE001
+            ok = False
+        check("M YAML validity", ok, f"merge title={title!r} rc={rc} err={err[-200:]}\n{blk}")
+
+# ======================================================================================
+# N. behaviors fixed in the prod-polish pass (≈40)
+# ======================================================================================
+NV = make_vault("fixes", n=10)
+# non-UTF-8 input is refused, nothing captured
+for i in range(5):
+    data = os.urandom(20) + b"\xff\xfe\xc3"
+    before = len(list((NV / "sources/manual").glob("*.md")))
+    rc, out, err = run(["ingest", "-", "--type", "manual", "--title", f"bad{i}"], cwd=NV, stdin=data)
+    check("N fixes", rc != 0 and "UTF-8" in err and len(list((NV / "sources/manual").glob("*.md"))) == before,
+          f"non-utf8 rc={rc} err={err[-200:]}")
+# date comparisons are lexical when not numeric
+rc, out, _ = run(["sql", "SELECT title FROM notes WHERE updated > '2026-01-01'"], cwd=NV)
+check("N fixes", "-- 10 row(s)" in out, f"date compare: {out[-80:]}")
+rc, out, _ = run(["sql", "SELECT title FROM notes WHERE updated < '2026-01-01'"], cwd=NV)
+check("N fixes", "-- 0 row(s)" in out, f"date compare lt: {out[-80:]}")
+# query --json honors --limit
+rc, out, _ = run(["query", "note", "--json", "--limit", "2"], cwd=NV)
+check("N fixes", len(json.loads(out)) <= 2, "json ignores --limit")
+# sql log lines append chronologically at the end of ## Log
+p0 = NV / "notes/n000.md"
+p0.write_text(p0.read_text().replace("## Log\n- 2026-01-01 — created\n", "## Log\n- 2026-01-01 — created\n- 2026-01-02 — edited\n"))
+run(["sql", "UPDATE notes SET status='review' WHERE title LIKE 'Note 0 %'", "--apply"], cwd=NV)
+log = p0.read_text().split("## Log", 1)[1].strip().splitlines()
+check("N fixes", log and "sql: status='review'" in log[-1] and "created" in log[0], f"log order: {log}")
+# no-op list op does not touch the file
+p1 = NV / "notes/n001.md"; b1 = p1.read_bytes()
+tag1 = as_list_(M.parse_frontmatter(p1.read_text())[0].get("tags"))[0]
+run(["sql", f"UPDATE notes SET tags = tags + '{tag1}' WHERE title LIKE 'Note 1 %'", "--apply"], cwd=NV)
+check("N fixes", p1.read_bytes() == b1, "no-op list_add rewrote the file")
+# MERGE: keep linking to drop does not become a self-link; human region in a third note untouched
+for i in range(4):
+    a, b, c = R.sample(range(2, 10), 3)
+    pa, pb, pc = (NV / f"notes/n{x:03d}.md" for x in (a, b, c))
+    if any(M._is_locked(M.parse_frontmatter(q.read_text())[0]) for q in (pa, pb)):
+        continue
+    ida = M.parse_frontmatter(pa.read_text())[0]["id"]; idb = M.parse_frontmatter(pb.read_text())[0]["id"]
+    if M.parse_frontmatter(pa.read_text())[0].get("status") == "superseded":
+        continue
+    pb.write_text(pb.read_text().replace("## Log", f"see [[{ida}]]\n\n## Log"))
+    pc.write_text(pc.read_text().replace("## Log", f"<!-- audock:human -->\nmine [[{ida}]]\n<!-- /audock:human -->\nalso [[{ida}]]\n\n## Log"))
+    rc, out, err = run(["sql", f"MERGE '{ida}' INTO '{idb}'", "--apply"], cwd=NV)
+    tb, tc = pb.read_text(), pc.read_text()
+    check("N fixes", rc == 0 and f"[[{idb}]]" not in tb.split("## Log")[0], f"self-link created in keep:\n{tb}")
+    check("N fixes", f"mine [[{ida}]]" in tc and f"also [[{idb}]]" in tc, f"human region / rewire wrong:\n{tc}")
+    check("N fixes", f"updated: {M.today()}" in tb, "merge did not bump keep updated")
+# doctor: a self-link doesn't make a note non-orphan
+po = NV / "notes/orph.md"
+po.write_text("---\nid: 20260101-orph\ntitle: Orph\ntype: note\ntags: [x]\nstatus: stable\n---\n\nme [[20260101-orph]] [[n001]]\n")
+rc, out, _ = run(["doctor"], cwd=NV)
+check("N fixes", "notes/orph.md" in out.split("orphan notes")[1].split("under-linked")[0], "self-link counted as backlink")
+# frozen-binary vault fallback = cwd (simulated)
+M.sys.frozen = True
+try:
+    os.chdir(SB)
+    check("N fixes", M._resolve_vault(None) == Path.cwd().resolve(), "frozen fallback not cwd")
+finally:
+    del M.sys.frozen
 
 # ======================================================================================
 total_p = sum(p for p, f in RESULTS.values()); total_f = sum(f for p, f in RESULTS.values())

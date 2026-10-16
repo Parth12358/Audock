@@ -36,12 +36,14 @@ natively in [Obsidian](https://obsidian.md).
 ## CLI
 
 ```sh
+tools/audock init [path] [--dry-run]          # scaffold Audock into a new or existing vault
 tools/audock new note|source|moc "Title"      # scaffold a file from a template
 tools/audock ingest <file|url|-> --type web   # capture raw material into sources/ (verbatim+hash)
 tools/audock similar "Title"                  # top-k similar notes (run before adding — dedup gate)
 tools/audock context "question" [--k N --all] # bounded answer pack — the cheapest way to query
 tools/audock query "text" [--tag t --type note --since 2026-01-01 --all --json]
 tools/audock show <id> [--body | --raw]       # one item; --raw = verbatim (lossless drill-down)
+tools/audock sql "SELECT|UPDATE|MERGE …" [--apply]  # SQL-style bulk query/edit (dry-run default)
 tools/audock backlinks <id>                   # notes/MOCs that link to this one
 tools/audock view "Name" [--tag t --status s] # emit an Obsidian Bases (.base) live-table view
 tools/audock log "what you did"               # append to today's journal/<date>.md
@@ -52,7 +54,12 @@ tools/audock doctor                           # links / missing-source / orphans
 Pure Python 3, **no dependencies and no external tools** — ranking is a built-in field-weighted
 **BM25** (title/summary weighted over body) with light stemming (`embedding`≈`embeddings`).
 Superseded notes are hidden from queries unless `--all`. Journal entries are an activity log,
-excluded from knowledge queries.
+excluded from knowledge queries. Captures are stored as **exact UTF-8 text** (line endings
+included; the hash covers the input bytes); non-UTF-8 input is refused rather than altered, and a
+failed or refused URL fetch errors out instead of saving anything.
+
+Run the tests with `tests/run.sh` (≈100 regression + ≈1,600 seeded synthetic cases; install
+PyYAML to include the Obsidian-YAML validity checks).
 
 ### Set up in a new folder or an existing Obsidian vault
 

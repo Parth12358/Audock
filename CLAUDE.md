@@ -111,7 +111,7 @@ links — never hard-deletes). `sql` never touches `locked`/#human notes. Then:
 ## Conventions
 
 - **IDs:** notes `YYYYMMDD-<slug>`; sources `YYYYMMDDThhmmss-<slug>` (UTC). Set by the CLI.
-- **Slugs:** lowercase, hyphenated, ASCII.
+- **Slugs:** lowercase and hyphenated; letters from any script are kept (`café`, `日本語`).
 - **Tags:** hierarchical, e.g. `domain/ml`, `topic/embeddings`, `project/audock`. MOCs carry
   `moc`.
 - **Links:** always `[[wikilink]]` by note id or title (shortest form), never Markdown links,
@@ -131,7 +131,9 @@ tools/audock show <id> [--body | --raw]                             # one item; 
 tools/audock sql "SELECT|UPDATE|MERGE ..." [--apply]                # SQL-style bulk query/edit
 tools/audock backlinks <id>                                         # who links here
 tools/audock log "what you did"                                     # append to today's journal
-tools/audock reindex
+tools/audock view "Name" [--tag t] [--type note|source|moc] [--status s]  # Obsidian Bases view
+tools/audock init [path] [--dry-run]                                # bootstrap a vault
+tools/audock reindex [--related]
 tools/audock doctor
 ```
 (`--all` includes `superseded` notes, which are hidden by default. Add `--vault <path>` or set

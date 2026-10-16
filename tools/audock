@@ -51,9 +51,11 @@ def _resolve_vault(explicit=None):
     for d in [cur, *cur.parents]:
         if (d / "notes").is_dir() and (d / "sources").is_dir():
             return d
+    if getattr(sys, "frozen", False):  # release binary: its own path is a temp dir
+        return cur
     try:
         return Path(__file__).resolve().parent.parent
-    except NameError:  # frozen binary with no real __file__
+    except NameError:
         return cur
 KIND_TO_DIR = {
     "conversation": "conversations",
@@ -343,25 +345,39 @@ def _fetch_url(src):
     try:
         with opener.open(req, timeout=20) as r:
             data = r.read(MAX_FETCH + 1)
+            charset = r.headers.get_content_charset() or "utf-8"
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001
         sys.exit(f"error: could not fetch {src}: {e}")
     if len(data) > MAX_FETCH:
         sys.exit(f"error: {src} is larger than {MAX_FETCH} bytes; refusing a truncated capture")
-    return data.decode("utf-8", errors="replace")
+    try:  # web pages are decoded text in their declared charset, stored as UTF-8
+        return data.decode(charset)
+    except (LookupError, UnicodeDecodeError):
+        return data.decode("utf-8", errors="replace")
+
+
+def _utf8(data, what):
+    """Decode a capture strictly. Replacing bad bytes would silently break the byte-verbatim
+    promise of sources/, so non-UTF-8 input is refused with a clear error instead."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        sys.exit(f"error: {what} is not valid UTF-8 text (byte {e.start}); Audock captures text "
+                 "verbatim — convert it first, e.g. `iconv -f latin1 -t utf-8`")
 
 
 def _load_body(src, kind):
     """Return (body_text, origin_ref) for ingest input."""
     if src == "-":
         # bytes, not text mode: text mode may translate newlines and break byte-verbatim capture
-        return sys.stdin.buffer.read().decode("utf-8", errors="replace"), "stdin"
+        return _utf8(sys.stdin.buffer.read(), "stdin"), "stdin"
     if re.match(r"^https?://", src, re.I):
         return _fetch_url(src), src
     p = Path(src)
     if p.exists():
-        return p.read_bytes().decode("utf-8", errors="replace"), str(p)  # keep \r\n verbatim
+        return _utf8(p.read_bytes(), str(p)), str(p)  # bytes in, \r\n kept verbatim
     sys.exit(f"error: no such file/url: {src}")
 
 
@@ -650,7 +666,7 @@ def cmd_query(args):
                       include_superseded=getattr(args, "all", False))
     if args.json:
         import json
-        print(json.dumps(results, indent=2))
+        print(json.dumps(results[: args.limit], indent=2))
         return
     if not results:
         print("no matches")
@@ -932,8 +948,11 @@ def cmd_doctor(args):
         # source bodies are verbatim captures (any [[...]] in them is incidental, not a link).
         if rel in GENERATED or fm.get("type") in ("journal", "source"):
             continue
+        own = _keys_of(p, fm)
         for target in _links(body):
             tgt = target.strip()
+            if tgt.lower() in own:
+                continue  # self-link: not a backlink, not broken
             if tgt.lower() not in names:
                 broken.append((rel, tgt))
             else:
@@ -1155,10 +1174,12 @@ def _eval_cond(p, fm, body, graph, cond):
             return any(str(x).lower() in vals for x in val)
         return str(val).lower() in vals
     if op in (">", "<", ">=", "<="):
+        if val in (None, "", []) or isinstance(val, list):
+            return False
         try:
             a, b = float(val), float(target)
         except (TypeError, ValueError):
-            return False
+            a, b = str(val), str(target)  # lexical: works for ISO dates (2026-01-02 > 2026-01-01)
         return {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[op]
     return False
 
@@ -1197,6 +1218,34 @@ def _match(p, fm, body, graph, conds):
     return any(all(_eval_cond(p, fm, body, graph, c) for c in ands) for ands in conds)
 
 
+_YAML_SPECIAL_START = tuple("[]{}&*!|>'\"%@`#,?:-")
+_YAML_WORDS = {"true", "false", "null", "yes", "no", "on", "off", "~"}
+
+
+def _yaml_scalar(v):
+    """Emit a value so YAML (and Obsidian's Properties) reads it back as the same string:
+    quote it when it starts with a YAML indicator, contains ': ' or ' #', has edge spaces,
+    or looks like a bool/null. Plain safe text stays unquoted."""
+    s = str(v)
+    if s == "":
+        return ""
+    if (s != s.strip() or s.startswith(_YAML_SPECIAL_START) or ": " in s or " #" in s
+            or s.endswith(":") or s.lower() in _YAML_WORDS or "\n" in s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def _yaml_list(items):
+    """Inline YAML list with each item quoted when needed (commas, brackets, quotes, …)."""
+    out = []
+    for x in items:
+        x = str(x)
+        bad = any(c in x for c in ",[]{}\"'#") or x != x.strip() or x == "" or \
+            x.startswith(_YAML_SPECIAL_START) or ": " in x or x.lower() in _YAML_WORDS
+        out.append(json.dumps(x, ensure_ascii=False) if bad else x)
+    return "[" + ", ".join(out) + "]"
+
+
 def _set_fm_field(raw, key, value_str):
     """Set one frontmatter key in place. Preserves a UTF-8 BOM and CRLF line endings, and
     removes the old value's continuation lines (indented, or an unindented `- item` block list)
@@ -1233,10 +1282,17 @@ def _set_fm_field(raw, key, value_str):
 
 
 def _append_log(raw, line):
+    """Append a line to the end of the ## Log section (chronological order), stopping before
+    the next heading or marker block; create the section if missing."""
     lines = raw.split("\n")
     for i, ln in enumerate(lines):
         if ln.strip().lower() == "## log":
-            lines.insert(i + 1, line)
+            last, k = i, i + 1
+            while k < len(lines) and not lines[k].lstrip().startswith(("#", "<!--")):
+                if lines[k].strip().startswith("- "):
+                    last = k
+                k += 1
+            lines.insert(last + 1, line)
             return "\n".join(lines)
     return raw.rstrip() + f"\n\n## Log\n{line}\n"
 
@@ -1306,7 +1362,7 @@ def _sql_select(stmt, args):
 def _parse_assignments(set_s):
     assigns = []
     for a in _split_inline_list(set_s):
-        m = re.match(r"(\w+)\s*=\s*(.+)$", a.strip(), re.S)
+        m = re.match(r"([\w-]+)\s*=\s*(.+)$", a.strip(), re.S)
         if not m:
             sys.exit(f"sql: cannot parse assignment: {a!r}")
         field, rhs = m.group(1), m.group(2).strip()
@@ -1314,6 +1370,10 @@ def _parse_assignments(set_s):
             sys.exit(f"sql: field '{field}' is protected and cannot be set")
         if rhs.upper() == "NULL":
             assigns.append((field, "clear", None))
+        elif rhs.startswith("[") and rhs.endswith("]"):
+            inner = rhs[1:-1].strip()
+            assigns.append((field, "set_list", [_unquote(x) for x in _split_inline_list(inner)]
+                            if inner else []))
         elif re.match(rf"{re.escape(field)}\s*\+\s*", rhs):
             assigns.append((field, "list_add", _unquote(rhs.split("+", 1)[1])))
         elif re.match(rf"{re.escape(field)}\s*-\s*", rhs):
@@ -1348,20 +1408,26 @@ def _sql_update(stmt, args):
         new = raw
         notes = []
         for field, kind, arg in assigns:
+            cur_fm = parse_frontmatter(new)[0]
             if kind == "set":
-                new = _set_fm_field(new, field, arg)
-                notes.append(f"{field}={arg!r}")
+                if str(cur_fm.get(field, "")) != arg or field not in cur_fm:
+                    new = _set_fm_field(new, field, _yaml_scalar(arg))
+                    notes.append(f"{field}={arg!r}")
+            elif kind == "set_list":
+                if as_list(cur_fm.get(field)) != arg or field not in cur_fm:
+                    new = _set_fm_field(new, field, _yaml_list(arg))
+                    notes.append(f"{field}={arg!r}")
             elif kind == "clear":
-                new = _set_fm_field(new, field, "")
-                notes.append(f"{field}=NULL")
-            else:  # list_add / list_remove
-                cur = as_list(parse_frontmatter(new)[0].get(field))
-                if kind == "list_add" and arg not in cur:
-                    cur.append(arg)
-                elif kind == "list_remove":
-                    cur = [x for x in cur if x != arg]
-                new = _set_fm_field(new, field, "[" + ", ".join(cur) + "]")
-                notes.append(f"{field}{'+' if kind == 'list_add' else '-'}={arg!r}")
+                if cur_fm.get(field) not in ("", None) or field not in cur_fm:
+                    new = _set_fm_field(new, field, "")
+                    notes.append(f"{field}=NULL")
+            else:  # list_add / list_remove — touch the file only if the list changes
+                cur = as_list(cur_fm.get(field))
+                nxt = cur + [arg] if (kind == "list_add" and arg not in cur) else \
+                    [x for x in cur if x != arg] if kind == "list_remove" else cur
+                if nxt != cur:
+                    new = _set_fm_field(new, field, _yaml_list(nxt))
+                    notes.append(f"{field}{'+' if kind == 'list_add' else '-'}={arg!r}")
         if new != raw:
             new = _set_fm_field(new, "updated", today())
             if fm.get("type") == "note":
@@ -1379,14 +1445,21 @@ def _sql_update(stmt, args):
         print("\n(dry-run — re-run with --apply to write, then git commit)")
 
 
+_HUMAN_RE = re.compile(r"(<!-- audock:human -->.*?<!-- /audock:human -->)", re.S)
+
+
 def _rewrite_links(raw, drop_keys, keep_id):
+    """Point [[drop]] links at keep, preserving |alias and #section. Text inside
+    <!-- audock:human --> regions is never touched."""
     def repl(m):
         inner = m.group(1)
         head = re.split(r"[|#]", inner)[0]
         if head.strip().lower() in drop_keys:
             return f"[[{keep_id}{inner[len(head):]}]]"
         return m.group(0)
-    return re.sub(r"\[\[([^\]]+)\]\]", repl, raw)
+    parts = _HUMAN_RE.split(raw)  # odd indexes are human regions
+    return "".join(pt if i % 2 else re.sub(r"\[\[([^\]]+)\]\]", repl, pt)
+                   for i, pt in enumerate(parts))
 
 
 def _sql_merge(stmt, args):
@@ -1411,8 +1484,8 @@ def _sql_merge(stmt, args):
     rewired = []
     for p in md_files():
         fm, _ = parse_frontmatter(read(p))
-        if fm.get("type") in (None, "journal", "source") or p == dp or _is_locked(fm):
-            continue  # never rewrite verbatim sources or human-owned notes
+        if fm.get("type") in (None, "journal", "source") or p in (dp, kp) or _is_locked(fm):
+            continue  # never rewrite sources, human-owned notes, or the pair itself
         raw = read(p)
         new = _rewrite_links(raw, drop_keys, keep_id)
         if new != raw:
@@ -1424,12 +1497,14 @@ def _sql_merge(stmt, args):
     aliases = as_list(kfm.get("aliases"))
     if dfm.get("title") and dfm.get("title") not in aliases:
         aliases.append(dfm.get("title"))
-    kraw = _set_fm_field(kraw, "aliases", "[" + ", ".join(aliases) + "]")
+    kraw = _set_fm_field(kraw, "aliases", _yaml_list(aliases))
+    kraw = _set_fm_field(kraw, "updated", today())
     kraw = _append_log(kraw, f"- {today()} — sql: merged [[{dfm.get('id')}]] into this note")
     # drop: tombstone pointing at keep, superseded (history preserved, never deleted)
     draw = read(dp)
     draw = _set_fm_field(draw, "status", "superseded")
     draw = _set_fm_field(draw, "superseded_by", f'"[[{keep_id}]]"')
+    draw = _set_fm_field(draw, "updated", today())
     draw = _append_log(draw, f"- {today()} — sql: merged into [[{keep_id}]]")
     if args.apply:
         kp.write_text(kraw, encoding="utf-8")
@@ -1702,7 +1777,8 @@ def cmd_init(args):
     print("\nNext:")
     print("  1) git init && git add -A && git commit -m 'add Audock'   (if not a repo yet)")
     print("  2) audock reindex && audock doctor")
-    print("  3) In Obsidian: enable the Dataview community plugin.")
+    print("  3) In Obsidian: install the Dataview, Omnisearch and Smart Connections plugins\n"
+          "     (declared in .obsidian/community-plugins.json; Dataview renders the tables).")
     if existing:
         print("  4) Your existing notes are untouched. To fold one into Audock, add frontmatter")
         print("     (type: note, id, status); mark human-owned notes `locked: true` so I never edit them.")
@@ -1730,7 +1806,7 @@ def main():
     p_q = sub.add_parser("query", help="search frontmatter + body")
     p_q.add_argument("text", nargs="?", default="")
     p_q.add_argument("--tag")
-    p_q.add_argument("--type", choices=["note", "source", "moc", "entity"])
+    p_q.add_argument("--type", choices=["note", "source", "moc"])
     p_q.add_argument("--since", help="YYYY-MM-DD; filter by updated/created")
     p_q.add_argument("--limit", type=int, default=15)
     p_q.add_argument("--all", action="store_true", help="include superseded notes")
@@ -1775,7 +1851,7 @@ def main():
     p_v = sub.add_parser("view", help="emit an Obsidian Bases (.base) saved view (1.9+)")
     p_v.add_argument("name")
     p_v.add_argument("--tag")
-    p_v.add_argument("--type", choices=["note", "source", "moc", "entity"])
+    p_v.add_argument("--type", choices=["note", "source", "moc"])
     p_v.add_argument("--status", help="e.g. draft | stable")
     p_v.add_argument("--all", action="store_true", help="include superseded")
     p_v.set_defaults(func=cmd_view)

@@ -20,5 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install PyYAML (enables the Obsidian-YAML validity group)
+        run: python -m pip install pyyaml
       - name: Run suites
         run: tests/run.sh

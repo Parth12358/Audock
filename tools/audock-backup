@@ -73,6 +73,7 @@ fi
 
 # 3. dated point-in-time bundle + prune old ones
 BUNDLE="$BUNDLES/$NAME-$STAMP.bundle"
+[ -e "$BUNDLE" ] && BUNDLE="$BUNDLES/$NAME-$STAMP-$$.bundle"  # two runs in one second
 if git -C "$VAULT" bundle create -q "$BUNDLE" --all; then
   log "wrote bundle $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
 else

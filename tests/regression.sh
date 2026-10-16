@@ -10,6 +10,8 @@ no()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ -n "${2:-}
 # assert: desc ; condition-cmd...
 chk() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else no "$d"; fi; }
 section(){ printf '\n== %s ==\n' "$1"; }
+# portable in-place sed (GNU and BSD/macOS differ on `sed -i`)
+sedi() { local e="$1"; shift; local f; for f in "$@"; do sed "$e" "$f" > "$f.__t" && mv "$f.__t" "$f"; done; }
 
 section "new (note/moc/source)"
 "$A" new note "Transformer Architecture" >/dev/null
@@ -26,7 +28,7 @@ IN='Attention lets a token weigh all other tokens. Scaled dot-product attention 
 OUT=$(printf '%s' "$IN" | "$A" ingest - --type manual --title "Attention mechanism" --ref conv-1)
 SF=$(echo "$OUT" | awk '/captured/{print $2}')
 chk "source file created"          test -f "$SF"
-EXP=$(printf '%s' "$IN" | sha256sum | cut -d' ' -f1)
+EXP=$(printf '%s' "$IN" | python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
 grep -q "sha256:$EXP" "$SF" && ok "stored hash == sha256(input)" || no "stored hash == sha256(input)"
 # verbatim: body after frontmatter equals input (modulo trailing newline)
 BODY=$(awk 'f;/^---$/{c++; if(c==2)f=1}' "$SF")
@@ -70,7 +72,7 @@ section "context — bounded answer pack"
 "$A" context "attention" | grep -q 'drill to a source' && ok "context prints lossless-drill hint" || no "context prints lossless-drill hint"
 "$A" context "totally unrelated xyzzy plugh" | grep -qi 'no matches' && ok "context: honest empty" || no "context: honest empty"
 # bounding: ingest many matching notes, cap k=1 -> must announce omissions
-for i in 1 2 3; do "$A" new note "Beta Term $i" >/dev/null; sed -i 's/^tags: \[\]/tags: [topic\/beta]/' "notes/beta-term-$i.md"; echo "beta shared keyword alpha" >> "notes/beta-term-$i.md"; done
+for i in 1 2 3; do "$A" new note "Beta Term $i" >/dev/null; sedi 's/^tags: \[\]/tags: [topic\/beta]/' "notes/beta-term-$i.md"; echo "beta shared keyword alpha" >> "notes/beta-term-$i.md"; done
 "$A" context "beta alpha" --k 1 | grep -qi 'more match' && ok "context --k cap announces omissions (no silent cap)" || no "context --k cap announces omissions"
 
 section "show — resolve by id/title/alias/stem; compact vs raw"
@@ -94,9 +96,9 @@ section "doctor — broken / orphan / dup / stale"
 # broken link
 "$A" new note "Has Broken Link" >/dev/null; echo 'see [[does-not-exist-xyz]]' >> notes/has-broken-link.md
 # orphan already exists (beta terms / transformer) ; dup-title
-"$A" new note "Dup One" >/dev/null; cp notes/dup-one.md notes/dup-one-copy.md; sed -i 's/^id: .*/id: 20261015-dup-one-b/' notes/dup-one-copy.md
+"$A" new note "Dup One" >/dev/null; cp notes/dup-one.md notes/dup-one-copy.md; sedi 's/^id: .*/id: 20261015-dup-one-b/' notes/dup-one-copy.md
 # stale
-"$A" new note "Ancient Note" >/dev/null; sed -i 's/^updated: .*/updated: 2000-01-01/' notes/ancient-note.md
+"$A" new note "Ancient Note" >/dev/null; sedi 's/^updated: .*/updated: 2000-01-01/' notes/ancient-note.md
 DOUT=$("$A" doctor)
 echo "$DOUT" | grep -q 'does-not-exist-xyz' && ok "doctor finds broken link" || no "doctor finds broken link"
 echo "$DOUT" | grep -qi 'orphan notes (no backlinks): [1-9]' && ok "doctor finds orphans" || no "doctor finds orphans"
@@ -138,7 +140,7 @@ git checkout -q -- notes/embeddings.md
 section "supersede lifecycle"
 "$A" new note "Old Claim" >/dev/null
 printf 'embeddings supersede keyword zzzmarker' >> notes/old-claim.md
-sed -i 's/^status: draft/status: superseded/' notes/old-claim.md
+sedi 's/^status: draft/status: superseded/' notes/old-claim.md
 "$A" query "zzzmarker" | grep -qi 'no matches' && ok "query hides superseded by default" || no "query hides superseded by default"
 "$A" query "zzzmarker" --all | grep -qi 'old claim' && ok "query --all shows superseded" || no "query --all shows superseded"
 
@@ -146,7 +148,7 @@ section "note summary prefix boosts ranking"
 "$A" new note "Widget Protocol" >/dev/null
 "$A" new note "Gadget Protocol" >/dev/null
 # give gadget a summary mentioning sprocket; widget only body-mentions it once
-sed -i 's/^summary: $/summary: explains the sprocket handshake/' notes/gadget-protocol.md
+sedi 's/^summary: $/summary: explains the sprocket handshake/' notes/gadget-protocol.md
 echo 'sprocket appears once in body' >> notes/widget-protocol.md
 echo 'sprocket' >> notes/gadget-protocol.md
 TOP=$("$A" query "sprocket" | head -1)
@@ -170,7 +172,7 @@ grep -q 'type: journal' "journal/$TODAY.md" && ok "journal typed as journal" || 
 
 section "doctor hygiene checks (missing source, under-linked)"
 "$A" new note "Bad Provenance" >/dev/null
-sed -i 's/^sources: \[\]/sources: ["[[nonexistent-source-id]]"]/' notes/bad-provenance.md
+sedi 's/^sources: \[\]/sources: ["[[nonexistent-source-id]]"]/' notes/bad-provenance.md
 DH=$("$A" doctor)
 echo "$DH" | grep -qi 'citing a missing source' && echo "$DH" | grep -q 'nonexistent-source-id' && ok "doctor flags missing source" || no "doctor flags missing source"
 echo "$DH" | grep -qi 'under-linked notes' && ok "doctor has under-linked section" || no "doctor has under-linked section"
@@ -184,7 +186,7 @@ CP="$V-notpl"; rm -rf "$CP"; cp -r "$V" "$CP"; rm -rf "$CP/templates"
 
 section "locked (human-owned) marker"
 "$A" new note "Human Owned" >/dev/null
-sed -i 's/^locked: false/locked: true/' notes/human-owned.md
+sedi 's/^locked: false/locked: true/' notes/human-owned.md
 "$A" doctor | head -1 | grep -qi 'locked/human-owned' && "$A" doctor | head -1 | grep -qE '[1-9] locked' && ok "doctor counts locked notes" || no "doctor counts locked notes"
 "$A" query "Human Owned" | grep -qi 'human owned' && ok "locked notes still queryable (read-only, not hidden)" || no "locked notes still queryable"
 
@@ -229,8 +231,8 @@ echo 'see [[dedup-gate]] and [[two-layer-store]]' >> notes/linker-orphan.md
 "$A" doctor | grep -A20 'orphan notes' | grep -q 'linker-orphan' && ok "orphan-with-outlinks still flagged (Related not counted)" || no "orphan detection defeated by Related"
 
 section "tag hygiene (variant detection)"
-"$A" new note "Widget A" >/dev/null; sed -i 's/^tags: \[\]/tags: [widget]/' notes/widget-a.md
-"$A" new note "Widget B" >/dev/null; sed -i 's/^tags: \[\]/tags: [widgets]/' notes/widget-b.md
+"$A" new note "Widget A" >/dev/null; sedi 's/^tags: \[\]/tags: [widget]/' notes/widget-a.md
+"$A" new note "Widget B" >/dev/null; sedi 's/^tags: \[\]/tags: [widgets]/' notes/widget-b.md
 "$A" doctor | grep -A3 'tag variants' | grep -Eq 'widget.*widgets|widgets.*widget' && ok "doctor flags singular/plural tag variants" || no "tag variant detection"
 
 section "sql — SELECT"
@@ -251,7 +253,7 @@ if "$A" sql "UPDATE notes SET status='x'" 2>&1 | grep -qi 'WHERE'; then ok "UPDA
 
 section "sql — UPDATE skips locked notes"
 "$A" new note "Sql Locked" >/dev/null
-sed -i 's/^tags: \[\]/tags: [audock]/; s/^locked: false/locked: true/' notes/sql-locked.md
+sedi 's/^tags: \[\]/tags: [audock]/; s/^locked: false/locked: true/' notes/sql-locked.md
 "$A" sql "UPDATE notes SET summary='TOUCHED' WHERE tag='audock'" --apply | grep -qi 'skipped 1 locked' && ok "UPDATE reports skipped locked" || no "UPDATE skipped locked msg"
 grep -q '^summary: $' notes/sql-locked.md && ok "locked note left untouched by UPDATE" || no "locked untouched"
 
@@ -273,7 +275,7 @@ printf '\xef\xbb\xbf---\nid: bomnote\ntitle: Bom Note\ntype: note\ntags: [test]\
 SRCID=$(basename "$(ls sources/manual/*.md | head -1)" .md)
 "$A" sql "MERGE 'two-layer-store' INTO '$SRCID'" 2>&1 | grep -qi 'immutable\|not found' && ok "MERGE into source refused" || no "MERGE into source refused"
 # reindex --related must NOT write into a locked note
-"$A" new note "Locked Related" >/dev/null; sed -i 's/^locked: false/locked: true/' notes/locked-related.md
+"$A" new note "Locked Related" >/dev/null; sedi 's/^locked: false/locked: true/' notes/locked-related.md
 "$A" reindex --related >/dev/null
 grep -q '## Related' notes/locked-related.md && no "reindex --related wrote into locked note" || ok "reindex --related skips locked notes"
 # block-list YAML: UPDATE tag add must not corrupt a block-style list
